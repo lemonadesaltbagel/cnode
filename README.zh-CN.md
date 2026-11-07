@@ -31,20 +31,20 @@ CPU 和 GPU 直接插在本机上一样。代码和 AI 编程 agent 都留在笔
 顺序不太重要，通常是：先装算力节点，复制它打印的 **join 行**；用它安装控制节点；再把控制节点打印的
 **授权行**粘贴到节点上执行。
 
-下文的 `<raw-url>` 指本仓库的 raw 下载地址（`https://raw.githubusercontent.com/<owner>/<repo>/main`）。
+下文命令从本仓库的 raw 地址 `https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main` 下载。若是 fork，先运行 `tools/set-raw-url.sh https://raw.githubusercontent.com/<owner>/<repo>/main`。
 
 ### 1a. Windows 11 上的算力节点（WSL2）
 
 在**管理员** PowerShell 中（右键 > 以管理员身份运行）：
 
 ```powershell
-irm <raw-url>/install.ps1 | iex
+irm https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.ps1 | iex
 ```
 
 带参数（都可选）：
 
 ```powershell
-& ([scriptblock]::Create((irm <raw-url>/install.ps1))) -Distro Debian -User alice -AuthorizeKey 'ssh-ed25519 AAAA... laptop'
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.ps1))) -Distro Debian -User alice -AuthorizeKey 'ssh-ed25519 AAAA... laptop'
 ```
 
 它会按需启用 WSL2（之后要求重启，再运行同一条命令）；没有 Debian/Ubuntu 发行版时安装 Debian；合并下文的
@@ -59,7 +59,7 @@ irm <raw-url>/install.ps1 | iex
 ### 1b. 普通 Linux 上的算力节点（Debian/Ubuntu）
 
 ```bash
-curl -fsSL <raw-url>/install.sh | sudo bash -s -- node
+curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | sudo bash -s -- node
 ```
 
 参数：`--user 用户名`（默认是执行 sudo 的用户）、`--create-user`、`--port 2222`、`--sync-root 目录`
@@ -75,7 +75,7 @@ curl -fsSL <raw-url>/install.sh | sudo bash -s -- node
 ### 2. 控制节点（macOS 或 Linux）
 
 ```bash
-curl -fsSL <raw-url>/install.sh | bash -s -- control --host <主机> --user <用户> --fingerprint SHA256:...
+curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --host <主机> --user <用户> --fingerprint SHA256:...
 ```
 
 它会安装 Mutagen（macOS 用 Homebrew，否则用官方发布的二进制）、docker CLI（macOS + Homebrew）、

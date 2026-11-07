@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # compute-node: set up THIS machine (macOS or Linux) as a control node.
-# Normally run through install.sh:  curl -fsSL <raw-url>/install.sh | bash -s -- control [options]
+# Normally run through install.sh:  curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control [options]
 #
 #   --host H --user U [--port 2222]   register a compute node right away (optional; later: cnode add)
 #   --name NAME          its name (default: wsl - also keeps the alias of the original single-node setup)

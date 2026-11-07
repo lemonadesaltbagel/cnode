@@ -1,9 +1,9 @@
 # compute-node: turn this Windows PC into a compute node (WSL2 + sshd + Docker + GPU).
 #
 # Run in an ELEVATED PowerShell (Run as administrator):
-#   irm <raw-url>/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.ps1 | iex
 # With options:
-#   & ([scriptblock]::Create((irm <raw-url>/install.ps1))) -Distro Debian -User alice
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.ps1))) -Distro Debian -User alice
 # From a clone:
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 [-Options]
 #
@@ -40,7 +40,7 @@ param(
   [string]$RawUrl = ''
 )
 
-$CnRawUrlDefault = '<raw-url>'   # e.g. https://raw.githubusercontent.com/<owner>/<repo>/main
+$CnRawUrlDefault = 'https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main'   # e.g. https://raw.githubusercontent.com/<owner>/<repo>/main
 $TaskName = 'WSL Compute Node'
 $WslVmCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'   # Hyper-V firewall id of the WSL VM
 $ErrorActionPreference = 'Stop'
@@ -201,7 +201,7 @@ $srcWin = ''
 if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'scripts\node-setup.sh'))) {
   $srcWin = $PSScriptRoot
 } else {
-  if ($RawUrl -like '*<raw-url>*') { throw 'No download URL in this copy; pass -RawUrl https://raw.githubusercontent.com/<owner>/<repo>/main' }
+  if ($RawUrl -like '*https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main*') { throw 'No download URL in this copy; pass -RawUrl https://raw.githubusercontent.com/<owner>/<repo>/main' }
   $srcWin = Join-Path $env:TEMP ('compute-node-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
   foreach ($f in @('install.sh', 'scripts/node-setup.sh', 'node/cn-status', 'node/cn-authorize')) {
     $dst = Join-Path $srcWin ($f -replace '/', '\')

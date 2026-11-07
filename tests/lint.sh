@@ -20,5 +20,5 @@ check "install.ps1 is ASCII-only (Windows PowerShell 5.1 misreads BOM-less UTF-8
 cr="$(printf '\r')"
 check "no CRLF in shell scripts" sh -c "! grep -l '$cr' ${scripts[*]}"
 check "executable bits" sh -c 'for f in install.sh bin/cnode node/cn-status node/cn-authorize scripts/*.sh tools/*.sh tests/run.sh; do [ -x "$f" ] || exit 1; done'
-check "<raw-url> placeholder present (filled in by tools/set-raw-url.sh)" grep -q '<raw-url>' install.sh install.ps1
+check "download URL set (or the <raw-url> placeholder) in install.sh and install.ps1" sh -c "grep -q -E '<raw-url>|https://raw.githubusercontent.com/[^/]+/[^/]+/' install.sh && grep -q -E '<raw-url>|https://raw.githubusercontent.com/[^/]+/[^/]+/' install.ps1"
 finish

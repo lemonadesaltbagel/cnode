@@ -34,21 +34,21 @@ its own jobs (tmux etc.).
 Order does not matter much; the usual flow is: set up the compute node, copy its **join line**,
 set up the control node with it, then paste the control node's **authorize line** on the node.
 
-`<raw-url>` below stands for the raw download URL of this repository
-(`https://raw.githubusercontent.com/<owner>/<repo>/main`).
+The commands below download from this repository's raw URL, `https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main`.
+For a fork, run `tools/set-raw-url.sh https://raw.githubusercontent.com/<owner>/<repo>/main` first.
 
 ### 1a. Compute node on Windows 11 (WSL2)
 
 In an **elevated** PowerShell (right-click > Run as administrator):
 
 ```powershell
-irm <raw-url>/install.ps1 | iex
+irm https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.ps1 | iex
 ```
 
 With options (all optional):
 
 ```powershell
-& ([scriptblock]::Create((irm <raw-url>/install.ps1))) -Distro Debian -User alice -AuthorizeKey 'ssh-ed25519 AAAA... laptop'
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.ps1))) -Distro Debian -User alice -AuthorizeKey 'ssh-ed25519 AAAA... laptop'
 ```
 
 It enables WSL2 if needed (then asks for a reboot and to run the same command again), installs a
@@ -66,7 +66,7 @@ account **password** (not the PIN; for a Microsoft account, its password).
 ### 1b. Compute node on plain Linux (Debian/Ubuntu)
 
 ```bash
-curl -fsSL <raw-url>/install.sh | sudo bash -s -- node
+curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | sudo bash -s -- node
 ```
 
 Options: `--user NAME` (default: the user who ran sudo), `--create-user`, `--port 2222`,
@@ -83,7 +83,7 @@ Both variants end with something like:
 ### 2. Control node (macOS or Linux)
 
 ```bash
-curl -fsSL <raw-url>/install.sh | bash -s -- control --host <host> --user <user> --fingerprint SHA256:...
+curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --host <host> --user <user> --fingerprint SHA256:...
 ```
 
 This installs Mutagen (Homebrew on macOS, else the release binary), the docker CLI (macOS with
@@ -385,7 +385,7 @@ node/cn-status          node status snapshot (also piped over SSH by rx nodes)
 node/cn-authorize       add/list/remove control-node keys on a node
 templates/              agent rules blocks (en, zh-CN)
 tests/                  tests/run.sh [lint|control|node|multinode|ps|all]
-tools/set-raw-url.sh    fill in <raw-url> once the repository is published
+tools/set-raw-url.sh    fill in https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main once the repository is published
 ```
 
 ## Tests

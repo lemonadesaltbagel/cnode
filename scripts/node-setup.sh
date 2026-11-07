@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # compute-node: set up THIS Linux machine (WSL2 distro or plain Linux) as a compute node.
-# Normally run through install.sh:  curl -fsSL <raw-url>/install.sh | sudo bash -s -- node [options]
+# Normally run through install.sh:  curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | sudo bash -s -- node [options]
 #
 #   --user NAME          the account control nodes log in as (default: $SUDO_USER)
 #   --create-user        create --user if missing (adds it to sudo; asks for a password on a TTY)
@@ -271,6 +271,6 @@ echo "  join: host=${HOST_HINT} user=${TARGET_USER} port=${SSH_PORT} fingerprint
 [ "$WSL" = yes ] && echo "  (WSL with mirrored networking: use the Windows machine's Tailscale name or LAN IP as host)"
 echo
 echo "On each control node (first time: the full installer; later: cnode add):"
-echo "  curl -fsSL ${CN_RAW_URL:-<raw-url>}/install.sh | bash -s -- control --name <name> --host ${HOST_HINT} --user ${TARGET_USER} --port ${SSH_PORT} --fingerprint ${FP}"
+echo "  curl -fsSL ${CN_RAW_URL:-https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main}/install.sh | bash -s -- control --name <name> --host ${HOST_HINT} --user ${TARGET_USER} --port ${SSH_PORT} --fingerprint ${FP}"
 echo "  cnode add <name> --host ${HOST_HINT} --user ${TARGET_USER} --port ${SSH_PORT} --fingerprint ${FP}"
 echo "Then authorize that control node here, as ${TARGET_USER}:  cn-authorize '<the line printed by cnode key>'"
