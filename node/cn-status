@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# cn-status - hardware and live load of this compute node (read-only, no root needed).
+#   cn-status            one human-readable line
+#   cn-status --json     one JSON object: {"hostname", "hardware": {...static...}, "load": {...live...}}
+#   cn-status --both     the line, then the JSON (what `rx nodes` asks for)
+# Sync roots for the disk figures come from /etc/compute-node.conf (SYNC_ROOTS="/Users ...")
+# or CN_SYNC_ROOTS. Control nodes pipe their own copy of this script over SSH, so it must
+# stay dependency-free (bash + coreutils + procps; nvidia-smi, lscpu and tmux are optional)
+# and must not read stdin.
+set -u
+mode="${1:---line}"
+SYNC_ROOTS="${CN_SYNC_ROOTS:-}"
+if [ -z "$SYNC_ROOTS" ] && [ -r /etc/compute-node.conf ]; then
+  SYNC_ROOTS="$(sed -n 's/^SYNC_ROOTS="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/compute-node.conf | head -n1)"
+fi
+[ -n "$SYNC_ROOTS" ] || SYNC_ROOTS="/Users"
+
+js() { # JSON string (or null when empty)
+  [ -n "$1" ] || { printf 'null'; return; }
+  local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\t'/ }"; s="${s//$'\n'/ }"; s="${s//$'\r'/}"; printf '"%s"' "$s"
+}
+num() { case "$1" in ''|*[!0-9.]*|.) printf 'null' ;; *) printf '%s' "$1" ;; esac; }
+trim() { sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+has() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------- hardware (static) ----------------
+host="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null)"
+arch="$(uname -m)"; kernel="$(uname -r)"
+os=""; [ -r /etc/os-release ] && os="$(sed -n 's/^PRETTY_NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/os-release)"
+wsl=false
+if [ -d /run/WSL ] || [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || { grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null && [ -d /usr/lib/wsl ]; }; then wsl=true; fi
+container=false; { [ -e /.dockerenv ] || [ -e /run/.containerenv ]; } && container=true
+
+cpu_model="$(awk -F: '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null | trim)"
+[ -z "$cpu_model" ] && has lscpu && cpu_model="$(LC_ALL=C lscpu 2>/dev/null | awk -F: '/^Model name/{print $2; exit}' | trim)"
+threads="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)"
+cores="$(awk -F: '/^physical id/{p=$2} /^core id/{c[p "/" $2]=1} END{n=0; for (k in c) n++; if (n) print n}' /proc/cpuinfo 2>/dev/null)"
+[ -z "$cores" ] && has lscpu && cores="$(LC_ALL=C lscpu -p=core,socket 2>/dev/null | grep -v '^#' | sort -u | wc -l | tr -d ' ')"
+[ -n "$cores" ] && [ "$cores" != 0 ] || cores="$threads"
+visible="$(nproc 2>/dev/null || echo "$threads")"           # CPU affinity
+quota=""
+if [ -r /sys/fs/cgroup/cpu.max ]; then
+  read -r q per </sys/fs/cgroup/cpu.max
+  [ "$q" != max ] && quota="$(awk -v q="$q" -v p="$per" 'BEGIN{printf "%.1f", q/p}')"
+elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
+  q="$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)"; per="$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us 2>/dev/null || echo 100000)"
+  [ "$q" -gt 0 ] 2>/dev/null && quota="$(awk -v q="$q" -v p="$per" 'BEGIN{printf "%.1f", q/p}')"
+fi
+eff="$visible"; [ -n "$quota" ] && eff="$(awk -v a="$visible" -v b="$quota" 'BEGIN{print (b+0<a+0)?b:a}')"
+
+mem_total="$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo)"
+mem_avail="$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)"
+mem_limit=""
+if [ -r /sys/fs/cgroup/memory.max ] && [ "$(cat /sys/fs/cgroup/memory.max)" != max ]; then
+  mem_limit=$(( $(cat /sys/fs/cgroup/memory.max) / 1048576 ))
+  ccur=$(( $(cat /sys/fs/cgroup/memory.current 2>/dev/null || echo 0) / 1048576 ))
+  [ "$mem_limit" -lt "$mem_total" ] || mem_limit=""
+  [ -n "$mem_limit" ] && [ $((mem_limit - ccur)) -lt "$mem_avail" ] && mem_avail=$((mem_limit - ccur))
+fi
+
+# GPUs. NVIDIA through nvidia-smi (on WSL it lives in /usr/lib/wsl/lib, often not on PATH over SSH);
+# others (AMD, Intel) from sysfs with whatever the driver exposes.
+ghw=""; gld=""; gline=""; gload=""
+smi="$(command -v nvidia-smi 2>/dev/null || true)"
+[ -z "$smi" ] && [ -x /usr/lib/wsl/lib/nvidia-smi ] && smi=/usr/lib/wsl/lib/nvidia-smi
+if [ -n "$smi" ]; then
+  # header says "CUDA Version: x.y" (older) or "CUDA UMD Version: x.y" (newer)
+  cuda="$("$smi" 2>/dev/null | sed -n 's/.*CUDA[A-Za-z ]*Version: *\([0-9][0-9.]*\).*/\1/p' | head -n1)"
+  q=index,name,memory.total,memory.used,utilization.gpu,driver_version
+  rows="$("$smi" --query-gpu=$q,compute_cap --format=csv,noheader,nounits 2>/dev/null)" \
+    || rows="$("$smi" --query-gpu=$q --format=csv,noheader,nounits 2>/dev/null)"   # old drivers: no compute_cap
+  while IFS=, read -r gi gn gt gu gp gd gc; do
+    [ -n "$gi" ] || continue
+    gi="${gi// /}"; gn="$(echo "$gn" | trim)"; gt="${gt// /}"; gu="${gu// /}"; gp="${gp// /}"; gd="${gd// /}"; gc="${gc// /}"
+    ghw="${ghw:+$ghw,}{\"index\":$(num "$gi"),\"vendor\":\"nvidia\",\"name\":$(js "$gn"),\"mem_total_mb\":$(num "$gt"),\"driver\":$(js "$gd"),\"cuda\":$(js "$cuda"),\"compute_cap\":$(js "$gc")}"
+    free=""; [ -n "$(num "$gt")" ] && [ "$(num "$gt")" != null ] && [ "$(num "$gu")" != null ] && free=$((gt - gu))
+    gld="${gld:+$gld,}{\"index\":$(num "$gi"),\"mem_used_mb\":$(num "$gu"),\"mem_free_mb\":$(num "$free"),\"util_pct\":$(num "$gp")}"
+    gline="${gline:+$gline + }$gn $((${gt:-0} / 1024))G"
+    gload="${gload:+$gload, }gpu$gi ${gu}/${gt}MiB ${gp}%"
+  done <<<"$rows"
+else
+  i=0
+  for d in /sys/class/drm/card[0-9]*; do
+    case "$d" in *-*) continue ;; esac
+    [ -r "$d/device/vendor" ] || continue
+    v="$(cat "$d/device/vendor")"
+    case "$v" in 0x1002) vn=amd ;; 0x8086) vn=intel ;; 0x10de) vn=nvidia ;; *) continue ;; esac
+    gn=""; [ -r "$d/device/product_name" ] && gn="$(cat "$d/device/product_name")"
+    if [ -z "$gn" ] && has lspci; then gn="$(lspci -s "$(basename "$(readlink -f "$d/device")")" 2>/dev/null | sed 's/^[^:]*: //')"; fi
+    gt=""; gu=""; gp=""
+    [ -r "$d/device/mem_info_vram_total" ] && gt=$(( $(cat "$d/device/mem_info_vram_total") / 1048576 ))
+    [ -r "$d/device/mem_info_vram_used" ] && gu=$(( $(cat "$d/device/mem_info_vram_used") / 1048576 ))
+    [ -r "$d/device/gpu_busy_percent" ] && gp="$(cat "$d/device/gpu_busy_percent")"
+    drv="$(basename "$(readlink -f "$d/device/driver" 2>/dev/null)" 2>/dev/null)"
+    free=""; [ -n "$gt" ] && [ -n "$gu" ] && free=$((gt - gu))
+    ghw="${ghw:+$ghw,}{\"index\":$i,\"vendor\":\"$vn\",\"name\":$(js "$gn"),\"mem_total_mb\":$(num "$gt"),\"driver\":$(js "$drv"),\"cuda\":null,\"compute_cap\":null}"
+    gld="${gld:+$gld,}{\"index\":$i,\"mem_used_mb\":$(num "$gu"),\"mem_free_mb\":$(num "$free"),\"util_pct\":$(num "$gp")}"
+    gline="${gline:+$gline + }${gn:-$vn gpu}"
+    i=$((i + 1))
+  done
+fi
+
+# ---------------- load (live) ----------------
+read -r l1 l5 l15 _ </proc/loadavg
+disk_json=""; disk_line=""
+for r in $SYNC_ROOTS; do
+  p="$r"; while [ ! -e "$p" ] && [ "$p" != / ]; do p="$(dirname "$p")"; done
+  read -r dt da < <(df -Pk "$p" 2>/dev/null | awk 'NR==2{print int($2/1024), int($4/1024)}')
+  disk_json="${disk_json:+$disk_json,}{\"path\":$(js "$r"),\"free_mb\":$(num "${da:-}"),\"total_mb\":$(num "${dt:-}")}"
+  disk_line="${disk_line:+$disk_line }$r:$(( ${da:-0} / 1024 ))G"
+done
+tmux_json=""; tmux_line=""
+if has tmux; then
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    tmux_json="${tmux_json:+$tmux_json,}$(js "$t")"; tmux_line="${tmux_line:+$tmux_line,}$t"
+  done < <(tmux ls -F '#{session_name}' 2>/dev/null </dev/null)
+fi
+up="$(awk '{print int($1)}' /proc/uptime)"
+
+hardware="{\"cpu_model\":$(js "$cpu_model"),\"cpu_cores\":$(num "$cores"),\"cpu_threads\":$(num "$threads"),\"cpus_effective\":$(num "$eff"),\"mem_total_mb\":$(num "$mem_total"),\"mem_limit_mb\":$(num "$mem_limit"),\"gpus\":[${ghw}],\"os\":$(js "$os"),\"kernel\":$(js "$kernel"),\"arch\":$(js "$arch"),\"wsl\":$wsl,\"container\":$container}"
+load="{\"loadavg\":[$(num "$l1"),$(num "$l5"),$(num "$l15")],\"mem_available_mb\":$(num "$mem_avail"),\"gpus\":[${gld}],\"disk\":[${disk_json}],\"tmux\":[${tmux_json}],\"uptime_s\":$(num "$up")}"
+json="{\"hostname\":$(js "$host"),\"hardware\":${hardware},\"load\":${load}}"
+memtot="${mem_limit:-$mem_total}"
+line="${cpu_model:-cpu} ${cores}C/${threads}T eff ${eff}, $((memtot / 1024))G RAM, ${gline:-no GPU}$([ "$wsl" = true ] && echo ', WSL') | load ${l1}, mem $((mem_avail / 1024))G free${gload:+, $gload}, disk ${disk_line}, tmux ${tmux_line:--}"
+
+case "$mode" in
+  --json) printf '%s\n' "$json" ;;
+  --both) printf '%s\n%s\n' "$line" "$json" ;;
+  *) printf '%s\n' "$line" ;;
+esac

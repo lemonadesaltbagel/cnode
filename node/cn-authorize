@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# cn-authorize - let a control node log in to this compute node (sshd here is key-only).
+#   cn-authorize '<public key line>'      add a key (run as the node user; idempotent)
+#   cn-authorize --list                   show authorized keys with fingerprints
+#   cn-authorize --remove SHA256:...      remove a key by fingerprint
+#   sudo cn-authorize --user <name> ...   act on another user's authorized_keys
+# The control node prints the exact command to paste: `cnode key`.
+set -euo pipefail
+user="$(id -un)"
+if [ "${1:-}" = --user ]; then user="${2:?--user needs a name}"; shift 2; fi
+home="$(getent passwd "$user" | cut -d: -f6)"
+[ -n "$home" ] || { echo "cn-authorize: no such user: $user" >&2; exit 1; }
+[ "$user" = "$(id -un)" ] || [ "$(id -u)" -eq 0 ] || { echo "cn-authorize: --user needs root" >&2; exit 1; }
+ak="$home/.ssh/authorized_keys"
+
+ensure_file() {
+  install -d -m 700 "$home/.ssh"; [ -f "$ak" ] || : >"$ak"; chmod 600 "$ak"
+  [ "$(id -u)" -eq 0 ] && chown "$user:" "$home/.ssh" "$ak"
+  return 0
+}
+
+case "${1:-}" in
+  ""|-h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --list)
+    [ -f "$ak" ] || exit 0
+    while IFS= read -r l; do
+      case "$l" in ''|'#'*) continue ;; esac
+      printf '%s\n' "$l" | ssh-keygen -lf - 2>/dev/null || true
+    done <"$ak"
+    ;;
+  --remove)
+    fp="${2:?--remove needs a fingerprint (cn-authorize --list)}"; ensure_file
+    tmp="$(mktemp)"; found=0
+    while IFS= read -r l; do
+      if [ -n "$l" ] && [ "$(printf '%s\n' "$l" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')" = "$fp" ]; then found=1; continue; fi
+      printf '%s\n' "$l"
+    done <"$ak" >"$tmp"
+    cat "$tmp" >"$ak"; rm -f "$tmp"
+    [ "$found" = 1 ] && echo "removed $fp" || { echo "cn-authorize: $fp not found" >&2; exit 1; }
+    ;;
+  *)
+    key="$*"
+    fp="$(printf '%s\n' "$key" | ssh-keygen -lf - 2>/dev/null)" || { echo "cn-authorize: not a valid public key line" >&2; exit 1; }
+    case "$key" in *PRIVATE*) echo "cn-authorize: that is a private key - paste the .pub line" >&2; exit 1 ;; esac
+    ensure_file
+    blob="$(printf '%s\n' "$key" | awk '{for(i=1;i<NF;i++) if($i ~ /^(ssh-|ecdsa-|sk-)/){print $(i+1); exit}}')"
+    if [ -n "$blob" ] && grep -qF "$blob" "$ak"; then echo "already authorized: $fp"; exit 0; fi
+    printf '%s\n' "$key" >>"$ak"
+    echo "authorized: $fp"
+    ;;
+esac

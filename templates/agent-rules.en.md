@@ -1,0 +1,16 @@
+<!-- BEGIN compute-node -->
+## Remote compute nodes (rx / wsync)
+- Edit files, use git, grep and read files on this machine. Run heavy work (builds, test suites, training/inference, anything needing CUDA/GPU, large dependency installs, Linux-only tools) on a compute node with `rx`.
+- This machine does not have the project's dependencies (`.venv`, `node_modules`, ... live on the nodes). Do not run python/pytest/etc. locally; use `rx`.
+- Before dispatching heavy work, run `rx nodes --json` and choose a node:
+  - `reachable` must be true.
+  - Match the job to the hardware in `hardware`: `cpu_model`, `cpus_effective` (cgroup-aware), `mem_total_mb`, and per GPU `name`, `mem_total_mb`, `cuda`, `compute_cap`.
+  - Then check the live `load`: `mem_available_mb`, per GPU `mem_free_mb` and `util_pct`, `loadavg`, disk `free_mb`, and the running `tmux` sessions.
+- Never assume a node is idle: other people and agents share the nodes. Keep memory headroom: do not start a job on a node whose `mem_available_mb` (or GPU `mem_free_mb`) is below what the job needs plus a margin (about 10-20%, at least 2 GB); pick another node or wait. Do not run several memory-heavy jobs on one node at once unless the numbers allow it.
+- `rx -n <node> <cmd>` flushes local changes, runs `<cmd>` in the same absolute path on that node (login shell), then waits until the node's output has synced back. Without `-n` it uses the default node (`cnode list`). Quote shell syntax so it expands on the node: `rx -n <node> 'make -j$(nproc)'`.
+- First use of a project on a node: run `wsync -n <node>` in the project root; `wsync -l` lists sync sessions. Dependency directories (node_modules, .venv, target, ...) are not synced: install them on the node, e.g. `rx -n <node> uv sync`.
+- Jobs longer than a few minutes must not block: start them in tmux on the node, with a unique session name: `rx -n <node> 'mkdir -p logs && tmux new -d -s <name> "<cmd> 2>&1 | tee logs/<name>.log"'`. Then read `logs/<name>.log` locally (it syncs back) or check `rx -n <node> tmux ls`. Do not kill tmux sessions you did not start.
+- Results written on the node appear in the synced folder; read them locally.
+- Docker on a node: `docker --context <node> ...`; build with `rx -n <node> docker build .`; mount with `-v "$PWD:$PWD" -w "$PWD"` (paths are identical on both sides).
+- A service on a node: `ssh -N -L 8000:localhost:8000 cn-<node>`.
+<!-- END compute-node -->

@@ -1,0 +1,3 @@
+# A && B || C is used only where B cannot fail (echo/note).
+# ssh "... $(printf %q ...)" expands locally on purpose (quoted for the remote shell).
+disable=SC2015,SC2029
