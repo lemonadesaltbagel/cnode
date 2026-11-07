@@ -85,6 +85,9 @@ rx nodes               # 所有节点的硬件和负载
 docker --context wsl run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 ```
 
+**不止一台笔记本或节点？** 改用 [fleet](#fleet节点只加一次所有机器都有)：之后每加一台算力节点或笔记本，
+只需在它上面和管理机上各运行一条命令，其他机器会自动同步。
+
 ## 日常使用
 
 | 命令 | 作用 |
@@ -213,6 +216,60 @@ ssh -t cn-gpu1 tmux attach -t train
 每个会话在冲突时都以自己的笔记本为准，所以只有“同一时间只有一边在改”（或各改各的子目录）才安全；
 两边同时改同一个文件，或一边删除而另一边在改，可能来回覆盖甚至丢失修改。不同用户或不同路径互不影响。
 建议每个目录在每个节点上只有一个“主人”。
+
+### Fleet：节点只加一次，所有机器都有
+
+不用 fleet 时，每一对“算力节点 x 控制节点”都要手动配置（每台笔记本对每个节点各跑一次 `cnode add`）。
+**fleet** 用一个 SSH 证书颁发机构（CA）代替这些步骤：
+
+- 每个算力节点信任 CA 签发的证书，所以被批准的控制节点能登录**所有** fleet 节点（包括以后才加的），节点上什么都不用做；
+- 每个算力节点有 CA 签发的主机证书，控制节点据此验证，不再需要逐台确认主机密钥；
+- 节点列表是一份**由 CA 签名的登记表**，存放在私有 GitHub 仓库（通过 `gh`）或共享目录里。控制节点每分钟拉取一次
+  （macOS 用 launchd，Linux 用 `systemd --user` 定时器，否则用 cron），并转交给每个算力节点，所以新增或移除的节点
+  一分钟内各处可见，吊销也会自己送达节点。
+
+存放处本身不被信任：每个控制节点都用加入时固定下来的 CA 公钥校验签名，并拒绝序号更旧的登记表（防回滚）；
+算力节点对收到的内容做同样的检查。CA 私钥只在**管理机**上（默认带密码）。
+
+**一次性：在管理机（笔记本）上**（私有仓库不存在时用 `gh` 自动创建）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --fleet-init <owner>/cnode-fleet
+# 已经装过：cnode fleet init <owner>/cnode-fleet
+cnode fleet info     # 打印下面两条加入命令（CA 已填好）
+```
+
+**新的算力节点**：节点上一条命令，管理机上一条命令。
+
+```bash
+curl -fsSL .../install.sh | sudo bash -s -- node --key-only --fleet-ca 'ssh-ed25519 AAAA...'   # 在节点上
+cnode fleet add-node <名字> --host <主机> --user <用户> --fingerprint SHA256:...               # 在管理机上（节点安装结束时会打印这一行）
+```
+
+`add-node` 校验主机密钥（`--fingerprint`，或本机已信任的密钥，否则首次信任），为它签发主机证书并交给节点，
+把节点写入登记表并推送。fleet 中的每个控制节点一分钟内都会列出它（`cnode list` 里标为 `(fleet)`）并为它建好 docker context。
+以前手动登记的节点也这样迁入 fleet（节点上先带 `--fleet-ca` 重跑安装，再 `cnode fleet add-node <名字>`，主机和用户取自原有登记）。
+
+**新的控制节点**：新笔记本上一条命令，管理机上一条命令。
+
+```bash
+curl -fsSL .../install.sh | bash -s -- control --fleet <owner>/cnode-fleet --fleet-ca SHA256:...   # 在新笔记本上（需要 gh 已登录）
+cnode fleet approve                                                                             # 在管理机上：显示名字和密钥指纹，问 y/N
+```
+
+新笔记本把加入申请（它的公钥）放进存放处；`approve` 签发用户证书（principal `cnode`，有效期 52 周，禁止 agent/X11 转发），
+笔记本一分钟内取到。此后它能登录所有 fleet 节点，任何节点上都不需要改动。
+
+| 在管理机上 | 作用 |
+|---|---|
+| `cnode fleet status` | 存放处、CA、本机证书、登记表序号与上次同步时间、各节点是否已拿到最新登记表、待批准的申请。每个控制节点都能用。 |
+| `cnode fleet approve [<名字>...] [--yes]` | 批准等待中的控制节点。同名但换了新密钥的申请会替换（并吊销）旧密钥。 |
+| `cnode fleet add-node <名字> ...` / `remove-node <名字>` | 增加或移除算力节点。移除的节点的主机密钥对所有控制节点吊销。 |
+| `cnode fleet revoke <控制节点名>` | 吊销控制节点（例如笔记本丢失）：其密钥进入吊销列表，算力节点立即生效，并断开该用户在节点上已打开的 SSH 会话。当时离线的节点由下一个连上它的控制节点补发。 |
+| `cnode fleet renew [--within 30]` | 重签 N 天内到期的控制节点证书（`status` 提前 30 天提醒）。 |
+| `cnode fleet sync` / `info` / `leave` | 立即同步 / 打印加入命令 / 本机退出 fleet。 |
+
+算力节点上 `sudo cn-fleet-apply --status` 显示已应用的序号、吊销数和主机证书；节点安装加 `--no-fleet` 即退出 fleet。
 
 ### Agent 规则
 
@@ -405,10 +462,11 @@ $cs = Get-CimInstance Win32_ComputerSystem; Set-CimInstance -InputObject $cs -Pr
 
 ## 测试
 
-`tests/run.sh [lint|unit|ps|control|node|multinode|all]` 运行全部测试，不触碰真实机器（详见英文 README 的 Tests 一节）：
+`tests/run.sh [lint|unit|ps|control|fleetlocal|node|multinode|fleet|all]` 运行全部测试，不触碰真实机器（详见英文 README 的 Tests 一节）：
 内存/swap/页面文件公式与 `.wslconfig` 合并的单元测试、生成的 PowerShell 的纯解析检查（从不执行）、控制节点安装（桩替身）、
 Debian/Ubuntu 容器里的节点安装（密码与密钥登录、`--key-only`、Tailscale、模拟互操作下的 Windows 一侧：待办步骤、UAC 接受/拒绝、模拟重启、
-`pending.json` -> `cn-status --json`、`--agent-sudo`），以及两个节点容器 + 两个控制用户的端到端测试。
+`pending.json` -> `cn-status --json`、`--agent-sudo`），两个节点容器 + 两个控制用户的端到端测试，以及 fleet：本地用目录模拟 `gh` 测签名、篡改、回滚、批准、吊销（`fleetlocal`），
+容器里用真实 sshd 和证书测 `add-node`、一次批准即可登录所有节点、后加入的节点自动出现、吊销立即生效、收件箱拒收伪造内容（`fleet`）。
 Docker 测试使用当前 docker context，引擎可用内存低于 `MIN_AVAILABLE_MB`（7000）时自动跳过，容器有内存上限；不使用 GPU，也不触碰真实的
 Windows 宿主（`.wslconfig`、页面文件、计划任务）。
 

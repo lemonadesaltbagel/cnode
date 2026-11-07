@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# cn-fleet-apply - apply what control nodes dropped into the node user's fleet inbox (run as root).
+#   cn-fleet-apply [--quiet]     process ~<user>/.cnode/inbox: registry.signed, host-cert.pub
+#   cn-fleet-apply --configure   (re)write the sshd drop-in and an empty revocation list if missing
+#   cn-fleet-apply --status      serial, host certificate, number of revoked keys
+# Started by the systemd path unit cnode-fleet.path (as soon as the inbox is not empty), by the
+# timer cnode-fleet.timer (every 5 minutes), or by a loop when there is no systemd (see node-setup).
+#
+# The inbox is writable by the node user, i.e. by every control node, so nothing in it is trusted:
+# files are read as that user (no symlink tricks with root's rights), at most 1 MiB, and accepted
+# only when they verify against the fleet CA in /etc/cnode/fleet/ca.pub:
+#   registry.signed  must carry the CA's signature and a higher serial than the one applied; its
+#                    revoke records become /etc/cnode/fleet/revoked.krl (sshd's RevokedKeys, read
+#                    on every login). New revocations also end the node user's open SSH sessions.
+#   host-cert.pub    must be a host certificate from the CA for THIS machine's ed25519 host key.
+set -uo pipefail
+D="${CN_FLEET_DIR:-/etc/cnode/fleet}"
+DROPIN="${CN_FLEET_DROPIN:-/etc/ssh/sshd_config.d/05-cnode-fleet.conf}"
+HOSTKEY=/etc/ssh/ssh_host_ed25519_key
+HOSTCERT=/etc/ssh/ssh_host_ed25519_key-cert.pub
+MAX=1048576
+REG_MAGIC="cnode-fleet-registry 1"
+quiet=0; mode=apply
+case "${1:-}" in
+  --quiet) quiet=1 ;;
+  --configure) mode=configure ;;
+  --status) mode=status ;;
+  -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  "") ;;
+  *) echo "cn-fleet-apply: unknown option $1" >&2; exit 2 ;;
+esac
+
+log() { [ "$quiet" = 1 ] || echo "cn-fleet-apply: $*"; logger -t cn-fleet-apply -- "$*" 2>/dev/null || true; }
+[ "$(id -u)" -eq 0 ] || { echo "cn-fleet-apply: run as root" >&2; exit 1; }
+[ -f "$D/ca.pub" ] || { [ "$quiet" = 1 ] || echo "cn-fleet-apply: not a fleet node (no $D/ca.pub)"; exit 0; }
+U="$(sed -n 's/^USER=//p' "$D/conf" 2>/dev/null | head -n1)"
+INBOX="$(sed -n 's/^INBOX=//p' "$D/conf" 2>/dev/null | head -n1)"
+[ -n "$U" ] && [ -n "$INBOX" ] && id "$U" >/dev/null 2>&1 || { echo "cn-fleet-apply: bad $D/conf" >&2; exit 1; }
+CA_FP="$(ssh-keygen -lf "$D/ca.pub" | awk '{print $2}')"
+
+exec 9>/run/cnode-fleet.lock 2>/dev/null || exec 9>"$D/.lock"
+flock -w 30 9 || { log "busy"; exit 1; }
+T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+
+# shellcheck disable=SC2016
+as_user() { if command -v runuser >/dev/null 2>&1; then runuser -u "$U" -- "$@"; else su -s /bin/sh "$U" -c '"$0" "$@"' -- "$@"; fi; }
+host_cert_ok() { # host_cert_ok FILE: host certificate by the fleet CA for this machine's ed25519 key
+  local info; info="$(ssh-keygen -L -f "$1" 2>/dev/null)" || return 1
+  printf '%s\n' "$info" | grep -q 'Type: .* host certificate' || return 1
+  [ "$(printf '%s\n' "$info" | awk '$1=="Signing" && $2=="CA:"{print $4; exit}')" = "$CA_FP" ] || return 1
+  [ "$(printf '%s\n' "$info" | awk '$1=="Public" && $2=="key:"{print $4; exit}')" = "$(ssh-keygen -lf "$HOSTKEY.pub" | awk '{print $2}')" ]
+}
+write_dropin() { # returns 0 if the drop-in changed
+  {
+    echo "# Managed by compute-node (cn-fleet-apply). Control nodes log in with certificates from the fleet CA."
+    echo "TrustedUserCAKeys $D/ca.pub"
+    echo "AuthorizedPrincipalsFile $D/principals/%u"
+    echo "RevokedKeys $D/revoked.krl"
+    if [ -f "$HOSTCERT" ] && host_cert_ok "$HOSTCERT"; then echo "HostCertificate $HOSTCERT"; fi
+  } >"$T/dropin"
+  if [ -f "$DROPIN" ] && cmp -s "$T/dropin" "$DROPIN"; then return 1; fi
+  install -m 0644 "$T/dropin" "$DROPIN"; return 0
+}
+empty_krl() { : >"$T/empty"; ssh-keygen -q -k -f "$T/krl0" -s "$D/ca.pub" "$T/empty" </dev/null && install -m 0644 "$T/krl0" "$D/revoked.krl"; }
+reload_sshd() {
+  sshd -t 2>"$T/sshd.err" || { log "sshd config test failed: $(tail -n1 "$T/sshd.err")"; return 1; }
+  if [ -d /run/systemd/system ]; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+  elif [ -f /run/sshd.pid ]; then kill -HUP "$(cat /run/sshd.pid)" 2>/dev/null || true; fi
+  return 0
+}
+
+# take NAME DEST: copy inbox/NAME, read as the node user (regular file, not a symlink, <= MAX
+# bytes), to DEST, and remove it from the inbox. Non-zero if there was nothing usable.
+take() {
+  local src="$INBOX/$1"
+  as_user test -e "$src" 2>/dev/null || return 1
+  # shellcheck disable=SC2016
+  as_user sh -c '[ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %s "$1")" -le "$2" ] && cat "$1"' _ "$src" "$MAX" >"$2" 2>/dev/null
+  local rc=$?
+  as_user rm -f "$src" 2>/dev/null
+  [ "$rc" = 0 ] && [ -s "$2" ]
+}
+
+apply_registry() {
+  take registry.signed "$T/signed" || return 0
+  awk '/^-----BEGIN SSH SIGNATURE-----$/{exit} {print}' "$T/signed" >"$T/body"
+  awk '/^-----BEGIN SSH SIGNATURE-----$/{s=1} s{print} /^-----END SSH SIGNATURE-----$/{exit}' "$T/signed" >"$T/body.sig"
+  if ! ssh-keygen -Y verify -f "$D/allowed_signers" -I cnode-fleet -n cnode-fleet -s "$T/body.sig" <"$T/body" >/dev/null 2>&1; then
+    log "rejected a registry that is not signed by the fleet CA $CA_FP"; return 1
+  fi
+  local serial cur; serial="$(awk '$1=="serial"{print $2; exit}' "$T/body")"; cur="$(cat "$D/serial" 2>/dev/null || echo 0)"
+  [ "$(head -n1 "$T/body")" = "$REG_MAGIC" ] && [[ "$serial" =~ ^[0-9]+$ ]] || { log "rejected a malformed registry"; return 1; }
+  [ "$serial" -gt "$cur" ] || { [ "$serial" = "$cur" ] || log "ignored registry serial $serial (serial $cur is applied)"; return 0; }
+  local ty bl
+  awk '$1=="revoke" && NF>=3{print $2, $3}' "$T/body" | while read -r ty bl; do
+    printf '%s %s\n' "$ty" "$bl" | ssh-keygen -lf - >/dev/null 2>&1 && printf 'key: %s %s\n' "$ty" "$bl"
+  done | sort -u >"$T/spec"
+  ssh-keygen -q -k -f "$T/krl" -s "$D/ca.pub" "$T/spec" </dev/null || { log "could not build the revocation list"; return 1; }
+  # the result must be readable by sshd (a broken RevokedKeys file refuses every key login)
+  ssh-keygen -Q -f "$T/krl" "$D/ca.pub" >/dev/null 2>&1; case $? in 0|1) ;; *) log "bad revocation list"; return 1 ;; esac
+  local added; added="$(comm -13 <(sort -u "$D/revoked.spec" 2>/dev/null) "$T/spec" | wc -l | tr -d ' ')"
+  install -m 0644 "$T/krl" "$D/revoked.krl.new" && mv -f "$D/revoked.krl.new" "$D/revoked.krl"
+  install -m 0644 "$T/spec" "$D/revoked.spec"
+  install -m 0644 "$T/signed" "$D/registry.signed"
+  echo "$serial" >"$D/serial.new" && mv -f "$D/serial.new" "$D/serial"
+  log "registry serial $serial applied ($(wc -l <"$T/spec" | tr -d ' ') revoked keys)"
+  if [ "$added" != 0 ]; then
+    # open sessions (and SSH masters) of a now revoked control node would live on: end all of the
+    # node user's SSH sessions; the others reconnect by themselves (tmux jobs keep running)
+    pkill -TERM -u "$U" -x 'sshd|sshd-session' 2>/dev/null && log "ended open SSH sessions of $U after $added new revocation(s)"
+  fi
+  return 0
+}
+
+apply_host_cert() {
+  take host-cert.pub "$T/cert" || return 0
+  host_cert_ok "$T/cert" || { log "rejected a host certificate that is not from the fleet CA for this host key"; return 1; }
+  if [ -f "$HOSTCERT" ] && cmp -s "$T/cert" "$HOSTCERT"; then return 0; fi
+  install -m 0644 "$T/cert" "$HOSTCERT.new" && mv -f "$HOSTCERT.new" "$HOSTCERT"
+  write_dropin
+  reload_sshd && log "host certificate installed: $(ssh-keygen -L -f "$HOSTCERT" | awk '$1=="Valid:"{print; exit}' | sed 's/^ *//')"
+}
+
+case "$mode" in
+  configure)
+    [ -f "$D/revoked.krl" ] || empty_krl || { echo "cn-fleet-apply: could not create $D/revoked.krl" >&2; exit 1; }
+    write_dropin || true
+    ;;
+  status)
+    echo "fleet CA: $CA_FP"
+    echo "registry serial: $(cat "$D/serial" 2>/dev/null || echo none)"
+    echo "revoked keys: $(wc -l <"$D/revoked.spec" 2>/dev/null | tr -d ' ' || echo 0)"
+    if [ -f "$HOSTCERT" ] && host_cert_ok "$HOSTCERT"; then echo "host certificate: $(ssh-keygen -L -f "$HOSTCERT" | awk '$1=="Valid:"{print; exit}' | sed 's/^ *//')"
+    else echo "host certificate: none (the admin runs: cnode fleet add-node ...)"; fi
+    ;;
+  apply)
+    [ -f "$D/revoked.krl" ] || empty_krl
+    if [ -d "$INBOX" ]; then
+      apply_registry
+      apply_host_cert
+      # leave the inbox empty (the path unit fires while it is not); unknown files are dropped
+      as_user find "$INBOX" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
+    fi
+    ;;
+esac
+exit 0

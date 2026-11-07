@@ -7,6 +7,13 @@
 #                        The first login asks for U's password once (or reads env CN_PASSWORD) and
 #                        installs this machine's SSH key, so later rx/wsync calls never prompt.
 #   --fingerprint FP     pin the node's host key (SHA256:... from its join line); default: trust on first use
+#   Fleet (one SSH CA for all nodes: new compute and control nodes show up everywhere by themselves):
+#   --fleet-init STORE   create a fleet with this machine as its admin; STORE is owner/repo (a private
+#                        GitHub repository, created through gh if missing) or dir:/path
+#   --fleet STORE        join an existing fleet as a control node (then the admin runs cnode fleet approve)
+#   --fleet-ca FP        the fleet CA fingerprint (SHA256:..., from cnode fleet info) to pin when joining
+#   --fleet-name NAME    this control node's name in the fleet (default: the hostname)
+#   --no-passphrase      --fleet-init: create the CA key without a passphrase (not recommended)
 #   The agent rules block (how coding agents should use rx/wsync/rx nodes) is written by default to
 #   ~/.claude/CLAUDE.md, and to ~/.codex/AGENTS.md if ~/.codex exists, between BEGIN/END markers.
 #   --agent-rules FILE   also write it to FILE (repeatable), e.g. a project's AGENTS.md
@@ -20,6 +27,7 @@ set -euo pipefail
 
 HOST=""; USER_="" ; PORT=2222; NAME=wsl; FP=""; RULES=(); NORULES=0; LANG_=en
 INSTALL=1; DOCKER=1; DOCKER_DEFAULT=1; SRC=""
+FLEET_INIT=""; FLEET_JOIN=""; FLEET_CA=""; FLEET_NAME=""; FLEET_NOPASS=0
 MUTAGEN_VERSION="${MUTAGEN_VERSION:-0.18.1}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,6 +36,11 @@ while [ $# -gt 0 ]; do
     --port) PORT="${2:?}"; shift 2 ;;
     --name) NAME="${2:?}"; shift 2 ;;
     --fingerprint) FP="${2:?}"; shift 2 ;;
+    --fleet-init) FLEET_INIT="${2:?}"; shift 2 ;;
+    --fleet) FLEET_JOIN="${2:?}"; shift 2 ;;
+    --fleet-ca) FLEET_CA="${2:?}"; shift 2 ;;
+    --fleet-name) FLEET_NAME="${2:?}"; shift 2 ;;
+    --no-passphrase) FLEET_NOPASS=1; shift ;;
     --accept-new|--copy-id) shift ;;   # (now the default behaviour)
     --agent-rules) RULES+=("${2:?}"); shift 2 ;;
     --no-agent-rules) NORULES=1; shift ;;
@@ -43,6 +56,7 @@ done
 [ -n "$SRC" ] || SRC="$(cd "$(dirname "$0")/.." && pwd)"
 { [ -n "$HOST" ] && [ -z "$USER_" ]; } && { echo "control-setup: --host needs --user" >&2; exit 2; }
 case "$LANG_" in en|zh-CN) ;; *) echo "control-setup: --lang must be en or zh-CN" >&2; exit 2 ;; esac
+{ [ -n "$FLEET_INIT" ] && [ -n "$FLEET_JOIN" ]; } && { echo "control-setup: --fleet-init and --fleet exclude each other" >&2; exit 2; }
 
 say() { printf '\n==> %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -115,6 +129,10 @@ if grep -qF '.local/bin' "$rc" 2>/dev/null; then note "PATH: $rc already mention
 else printf '\n# added by compute-node\nexport PATH="$HOME/.local/bin:$PATH"\n' >>"$rc"; note "PATH: added ~/.local/bin to $rc (open a new terminal)"; fi
 
 [ "$DOCKER" = 1 ] || export CN_NO_DOCKER=1   # cnode add: no docker contexts
+# remembered for the fleet's background sync, which creates docker contexts for new nodes
+CN_CONF="${CN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/compute-node}/config"
+mkdir -p "$(dirname "$CN_CONF")"; touch "$CN_CONF"
+{ grep -v '^docker=' "$CN_CONF" || true; [ "$DOCKER" = 1 ] || echo docker=0; } >"$CN_CONF.new" && mv "$CN_CONF.new" "$CN_CONF"
 
 say "SSH config: Include of the generated per-node aliases"
 # Migrate the original single-node setup: reuse its HostName/User/Port if none were given.
@@ -139,6 +157,17 @@ if [ -n "$HOST" ]; then
   [ "$ADD_RC" = 0 ] && cnode status "$NAME" || true
 fi
 
+FLEET_RC=0
+if [ -n "$FLEET_INIT" ]; then
+  say "Fleet: create it, with this machine as the admin (holds the CA)"
+  fargs=(fleet init "$FLEET_INIT"); [ -n "$FLEET_NAME" ] && fargs+=(--name "$FLEET_NAME"); [ "$FLEET_NOPASS" = 1 ] && fargs+=(--no-passphrase)
+  cnode "${fargs[@]}" || FLEET_RC=$?
+elif [ -n "$FLEET_JOIN" ]; then
+  say "Fleet: join as a control node"
+  fargs=(fleet join "$FLEET_JOIN"); [ -n "$FLEET_CA" ] && fargs+=(--ca "$FLEET_CA"); [ -n "$FLEET_NAME" ] && fargs+=(--name "$FLEET_NAME")
+  cnode "${fargs[@]}" || FLEET_RC=$?
+fi
+
 if [ "$NORULES" = 0 ]; then
   RULES=("$HOME/.claude/CLAUDE.md" ${RULES[@]+"${RULES[@]}"})
   [ -d "$HOME/.codex" ] && RULES+=("$HOME/.codex/AGENTS.md")
@@ -157,7 +186,12 @@ fi
 
 echo
 echo "Control node ready. Next:"
-[ -z "$HOST" ] && echo "  cnode add <name> --host <host> --user <user> --port 2222   (values from the node's join line)"
+[ "$FLEET_RC" != 0 ] && echo "  !! the fleet step failed (see above); retry with: cnode fleet ${FLEET_INIT:+init $FLEET_INIT}${FLEET_JOIN:+join $FLEET_JOIN}"
+if [ -n "$FLEET_INIT$FLEET_JOIN" ] && [ "$FLEET_RC" = 0 ]; then
+  echo "  Fleet: cnode fleet status   (fleet nodes appear by themselves; cnode fleet info prints the join commands)"
+elif [ -z "$HOST" ]; then
+  echo "  cnode add <name> --host <host> --user <user> --port 2222   (values from the node's join line)"
+fi
 [ "$ADD_RC" = 3 ] && echo "  the key is not on '$NAME' yet: on the node run  $(cnode key)  then check: cnode status $NAME"
 echo "  More nodes:  cnode add <name> --host <host> --user <user>   (asks for the password once)"
 echo "  Then, in a project:  wsync && rx nproc && rx nodes"

@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+Fleet: add a compute or control node once, every machine has it.
+
+- `cnode fleet`: one SSH CA (ed25519, on the admin only, passphrase by default) signs a user
+  certificate per control node (principal `cnode`, 52 weeks, no agent/X11 forwarding), a host
+  certificate per compute node, and the node registry (`ssh-keygen -Y sign`, serial only goes up)
+- the registry lives in a private GitHub repository through `gh` (created if missing; public
+  ones refused unless `--allow-public`) or a shared directory; the store is not trusted: readers
+  verify against the CA pinned at join time and refuse older serials
+- control nodes sync every minute (launchd, `systemd --user` timer, else cron; `rx nodes`
+  syncs when the last one is over 5 minutes old), regenerate `ssh_config` (fleet nodes: CA
+  known_hosts, `RevokedHostKeys`, `CertificateFile`), docker contexts and the default node, and
+  deliver the signed registry to every compute node's inbox
+- commands: `init`, `join`, `approve`, `add-node`, `remove-node`, `revoke`, `renew`, `sync`,
+  `status`, `info`, `leave`; fleet nodes are marked `(fleet)` in `cnode list` and replace manual
+  entries of the same name; malformed registry entries (anything that could inject into
+  `ssh_config`) are skipped
+- compute nodes: `--fleet-ca KEY` (kept on re-runs, `--no-fleet` removes it) sets
+  `TrustedUserCAKeys`, `AuthorizedPrincipalsFile` (node user only), `RevokedKeys` and later
+  `HostCertificate` in `05-cnode-fleet.conf`; `cn-fleet-apply` (root; systemd path unit + timer,
+  or a loop without systemd) reads the inbox as the node user, accepts only CA-signed registries
+  with a higher serial and host certificates for its own key, and ends the node user's SSH
+  sessions when new revocations arrive; the join line prints the `cnode fleet add-node` command
+- installers: `control --fleet-init STORE` / `--fleet STORE --fleet-ca FP [--fleet-name N]`;
+  `--no-docker` is remembered for the background sync
+- `cn-status --json` / `rx nodes --json`: `fleet` (CA, serial, revoked count, host certificate)
+- agent rules: never run fleet admin commands, tell the user instead
+- tests: `fleetlocal` (gh emulated on a directory) and `fleet` (3 nodes, 2 control users, real
+  certificates)
+
+Also:
+
 - sshd: passwords are accepted again only from private, link-local, loopback and Tailscale
   addresses (`Match Address`, as in the original setup); keys work from anywhere. The one-time
   password login of `cnode add` keeps working on a LAN or tailnet. `--password-anywhere` restores

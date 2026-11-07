@@ -93,6 +93,10 @@ rx nodes               # hardware and load of every node
 docker --context wsl run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 ```
 
+**More than one laptop or node?** Set up a [fleet](#fleet-add-a-node-once-every-machine-has-it)
+instead: then a new compute node or laptop is one command on it plus one on the admin, and every
+other machine picks it up by itself.
+
 ## Daily use
 
 | Command | What it does |
@@ -229,6 +233,70 @@ when one side edits at a time (or they work in different subfolders); concurrent
 same file, or a delete on one laptop while the other edits, can flip-flop or lose work. Different
 users or different paths never interact. Prefer one owner per folder per node.
 
+### Fleet: add a node once, every machine has it
+
+Without a fleet, each compute node x control node pair is set up by hand (`cnode add` on every
+laptop for every node). A **fleet** replaces that with one SSH certificate authority (CA):
+
+- every compute node trusts certificates from the CA, so an approved control node can log in to
+  **all** fleet nodes, including ones added later, with nothing done on the nodes;
+- every compute node gets a host certificate from the CA, so control nodes verify it with no
+  per-node host key or first-use prompt;
+- the node list is a **registry signed by the CA**, kept in a private GitHub repository (through
+  `gh`) or a shared directory. Control nodes fetch it every minute (launchd on macOS, a
+  `systemd --user` timer on Linux, else cron) and deliver it to every compute node, so a new or
+  removed node shows up everywhere within a minute and revocations reach the nodes on their own.
+
+The store is not trusted: every control node checks the signature against the CA key it pinned
+when it joined and refuses an older serial (rollback), and compute nodes do the same for what
+they receive. The CA private key exists only on the **admin** machine (passphrase-protected by
+default).
+
+**Once, on the admin laptop** (creates the private repository with `gh` if it is missing):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --fleet-init <owner>/cnode-fleet
+# already installed:  cnode fleet init <owner>/cnode-fleet
+cnode fleet info     # prints the two join commands below with the CA filled in
+```
+
+**A new compute node**: one command on the node, one on the admin.
+
+```bash
+curl -fsSL .../install.sh | sudo bash -s -- node --key-only --fleet-ca 'ssh-ed25519 AAAA...'   # on the node
+cnode fleet add-node <name> --host <host> --user <user> --fingerprint SHA256:...             # on the admin (the node prints this line)
+```
+
+`add-node` checks the host key (`--fingerprint`, or one this machine already trusts, else first
+use), signs a host certificate for it, hands it to the node, adds the node to the registry and
+pushes it. Every control node of the fleet lists the node (`cnode list` marks it `(fleet)`) and
+gets a docker context for it within a minute. Nodes registered by hand before are moved into the
+fleet the same way (`cnode fleet add-node <name>` takes host and user from the existing entry,
+after the node install was re-run with `--fleet-ca`).
+
+**A new control node**: one command on the laptop, one on the admin.
+
+```bash
+curl -fsSL .../install.sh | bash -s -- control --fleet <owner>/cnode-fleet --fleet-ca SHA256:...   # on the new laptop (needs gh logged in)
+cnode fleet approve                                                                             # on the admin: shows name + key fingerprint, asks y/N
+```
+
+The laptop sends a join request (its public key) to the store; `approve` signs a user
+certificate (principal `cnode`, valid 52 weeks, no agent/X11 forwarding) and the laptop picks it
+up within a minute. From then on it reaches every fleet node; nothing changes on any node.
+
+| On the admin | What it does |
+|---|---|
+| `cnode fleet status` | Store, CA, this machine's certificate, registry serial and last sync, nodes and whether each has the current registry, pending join requests. Works on every control node. |
+| `cnode fleet approve [<name>...] [--yes]` | Sign waiting control nodes. A request with a new key for an existing name replaces (and revokes) the old key. |
+| `cnode fleet add-node <name> ...` / `remove-node <name>` | Add or remove a compute node. A removed node's host key is revoked for all control nodes. |
+| `cnode fleet revoke <control-name>` | Revoke a control node (lost laptop): its key goes on the revocation list, which compute nodes apply at once and which also ends that user's open SSH sessions there. Nodes that are down get it from the next control node that reaches them. |
+| `cnode fleet renew [--within 30]` | Re-sign control-node certificates that expire within N days (`status` warns 30 days ahead). |
+| `cnode fleet sync` / `info` / `leave` | Fetch now / print the join commands / leave the fleet on this machine. |
+
+On a compute node `sudo cn-fleet-apply --status` shows the applied serial, the revoked keys and
+the host certificate; `--no-fleet` on the node install leaves the fleet again.
+
 ### Agent rules
 
 The control-node install writes a block between `<!-- BEGIN compute-node -->` and
@@ -262,6 +330,7 @@ lets the agent run anything on the node without asking, and files it writes ther
 | `cn-status`, `cn-authorize` | `/usr/local/bin`, settings in `/etc/compute-node.conf` |
 | Windows host (WSL only) | `.wslconfig` merge, boot task, Hyper-V firewall rule, pagefile: see [Windows side](#windows-side-wsl-nodes). State in `/etc/cnode/{windows.json,windows.env,pending.json}`. |
 | `/etc/sudoers.d/90-cnode-<user>` | Only with `--agent-sudo`. |
+| Fleet (only with `--fleet-ca`; kept on re-runs, `--no-fleet` removes it) | `/etc/cnode/fleet/` (CA key, `principals/<user>` = `cnode`, `revoked.krl`, applied `serial`), `/etc/ssh/sshd_config.d/05-cnode-fleet.conf` (`TrustedUserCAKeys`, `AuthorizedPrincipalsFile`, `RevokedKeys`, `HostCertificate`), `/usr/local/sbin/cn-fleet-apply`, `cnode-fleet.path`/`.timer` (without systemd a small loop), inbox `~<user>/.cnode/inbox`. |
 | systemd on WSL | `/etc/wsl.conf [boot] systemd=true` and `[user] default=`, used from the distro's next start; until then the services are started directly, so nothing has to be restarted now. |
 
 ### Control node (`scripts/control-setup.sh`, `bin/cnode`)
@@ -274,6 +343,7 @@ lets the agent run anything on the node without asking, and files it writes ther
 | `~/.ssh/id_ed25519` | Created only if missing; a passphrase goes to the macOS keychain. |
 | Mutagen daemon, docker context per node | `docker context use <first node>` unless `--keep-docker-context`. |
 | Agent rules block in `~/.claude/CLAUDE.md` (+ `~/.codex/AGENTS.md`) | Between markers, replaced in place; `--no-agent-rules` skips. |
+| Fleet (only with `--fleet-init`/`--fleet`) | `~/.config/compute-node/fleet/` (pinned CA key, last verified registry, certificate; on the admin also the CA private key), the background sync (`~/Library/LaunchAgents/io.github.lemonadesaltbagel.cnode.fleet-sync.plist`, `~/.config/systemd/user/cnode-fleet-sync.timer`, or a crontab line). |
 
 ## Windows side (WSL nodes)
 
@@ -373,6 +443,14 @@ This tool favours easy deployment; harden it when you need to.
   back to the laptop. Treat a node like a second account of yours.
 - `CN_PASSWORD` (for scripted `cnode add`) puts the password in the environment of that one
   command; prefer typing it.
+- **Fleet**: whoever holds the CA private key decides who logs in where, so it stays on the
+  admin with a passphrase; back it up offline. The registry store (a private repository) only
+  needs to be available, not trusted: a tampered or rolled-back registry is refused everywhere.
+  Anyone with write access to that repository can file join requests, but only `cnode fleet
+  approve` on the admin lets them in. Certificates are valid for the node user only (principal
+  `cnode` via `AuthorizedPrincipalsFile`), never for other accounts. Revocation (`cnode fleet
+  revoke`) takes effect on a node as soon as a control node delivers the new registry; until a
+  node is reached it still accepts the revoked key, which `cnode fleet status` shows.
 
 ## Networking: Tailscale (default) or LAN
 
@@ -429,6 +507,7 @@ Control node:
 mutagen sync terminate --label-selector compute     # all sessions made by wsync
 mutagen daemon unregister
 docker context use default && docker context rm <node> ...   # one per node, see: cnode list
+cnode fleet leave                                    # if in a fleet (removes the background sync); the admin needs --force
 rm -rf ~/.local/bin/{cnode,rx,wsync} ~/.local/share/compute-node ~/.config/compute-node
 awk '/^# BEGIN compute-node$/{s=1;next} /^# END compute-node$/{s=0;next} !s' ~/.ssh/config > ~/.ssh/config.new && mv ~/.ssh/config.new ~/.ssh/config
 ```
@@ -437,6 +516,8 @@ Compute node (WSL or Linux):
 ```bash
 sudo rm /etc/ssh/sshd_config.d/10-compute-node.conf /etc/sysctl.d/90-compute-node.conf /etc/compute-node.conf \
         /usr/local/bin/cn-status /usr/local/bin/cn-authorize /etc/profile.d/wsl-lib.sh /usr/local/bin/nvidia-smi
+sudo systemctl disable --now cnode-fleet.path cnode-fleet.timer 2>/dev/null   # fleet nodes only, then:
+sudo rm -f /etc/systemd/system/cnode-fleet.* /etc/ssh/sshd_config.d/05-cnode-fleet.conf /usr/local/sbin/cn-fleet-apply /etc/ssh/ssh_host_ed25519_key-cert.pub
 sudo systemctl restart ssh   # or disable it: sudo systemctl disable --now ssh
 sudo tailscale logout; sudo apt-get purge tailscale
 sudo rm -rf /etc/cnode /etc/sudoers.d/90-cnode-*
@@ -464,8 +545,9 @@ scripts/control-setup.sh  control-node setup (macOS/Linux)
 bin/cnode                 rx, wsync (symlinks to it), the node registry and status
 node/cn-status            node hardware/load snapshot (also piped over SSH by rx nodes)
 node/cn-authorize         add/list/remove control-node keys on a node (manual path)
+node/cn-fleet-apply       fleet: verify and apply registry/host certificate from the node's inbox (root)
 templates/                agent rules blocks (en, zh-CN)
-tests/                    tests/run.sh [lint|control|node|multinode|all]
+tests/                    tests/run.sh [lint|unit|ps|control|fleetlocal|node|multinode|fleet|all]
 ```
 
 The installers download from `https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main`; set `CN_RAW_URL` to use a fork or a tag.
@@ -493,6 +575,19 @@ The installers download from `https://raw.githubusercontent.com/lemonadesaltbage
   `--no-tailscale`, cn-authorize, the WSL `wsl.conf` path, the Windows side with mocked interop
   (`.wslconfig` merge and backup, pending steps, UAC accepted/declined, simulated reboot, Windows
   Tailscale detection, `pending.json` -> `cn-status --json`), `--agent-sudo`, idempotency.
+- `fleetlocal`: the fleet in throwaway HOMEs with `gh` emulated on a directory (contents API
+  with sha checks): init in a private repository (a public one refused), join with a pinned CA
+  (a wrong one refused), approve, certificates, a signed registry with nodes (entries that would
+  inject into `ssh_config` skipped), the generated `ssh_config`/known_hosts, delivery to nodes,
+  tampered, foreign-signed and rolled-back registries refused, revoke, renew, re-join with a new
+  key, the cron fallback, leave.
+- `fleet`: three compute-node containers installed with `--fleet-ca` and a control container
+  with two users, real sshd and certificates: `--fleet-init`/`--fleet` installs, `add-node` with a
+  pinned and a first-use host key, `rx` with nothing in `authorized_keys`, a second control node
+  working on every node after one `approve`, a node added later reaching it by itself, a node
+  without its host certificate refused, a tampered registry / symlink / another host's
+  certificate in the inbox rejected, revocation (open sessions ended, a node that was down gets
+  it later), `remove-node`, re-run and `--no-fleet`.
 - `multinode`: two compute-node containers and a control container with two users, all real
   (ssh, Mutagen): `cnode add` with a password installing the key, TOFU and pinned fingerprints,
   the manual `cn-authorize` path, `wsync -n` of one folder to both nodes, `rx -n`, `rx nodes --json`

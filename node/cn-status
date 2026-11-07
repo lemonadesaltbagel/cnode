@@ -154,7 +154,17 @@ fi
 
 hardware="{\"cpu_model\":$(js "$cpu_model"),\"cpu_cores\":$(num "$cores"),\"cpu_threads\":$(num "$threads"),\"cpus_effective\":$(num "$eff"),\"mem_total_mb\":$(num "$mem_total"),\"mem_limit_mb\":$(num "$mem_limit"),\"gpus\":[${ghw}],\"os\":$(js "$os"),\"kernel\":$(js "$kernel"),\"arch\":$(js "$arch"),\"wsl\":$wsl,\"container\":$container,\"windows\":${win_hw}}"
 load="{\"loadavg\":[$(num "$l1"),$(num "$l5"),$(num "$l15")],\"mem_available_mb\":$(num "$mem_avail"),\"gpus\":[${gld}],\"disk\":[${disk_json}],\"tmux\":[${tmux_json}],\"uptime_s\":$(num "$up"),\"windows_commit_free_gb\":$(num "$win_cfree"),\"windows_warnings\":[${win_warn}]}"
-json="{\"hostname\":$(js "$host"),\"hardware\":${hardware},\"load\":${load}}"
+# ---------------- fleet (cnode fleet; written by cn-fleet-apply into /etc/cnode/fleet) ----------------
+fleet=null
+FD="${CN_FLEET_DIR:-/etc/cnode/fleet}"
+if [ -r "$FD/ca.pub" ]; then
+  fca="$(ssh-keygen -lf "$FD/ca.pub" 2>/dev/null | awk '{print $2}')"
+  fser="$(cat "$FD/serial" 2>/dev/null)"; frev="$(wc -l <"$FD/revoked.spec" 2>/dev/null | tr -d ' ')"
+  fcert=false; [ -r /etc/ssh/ssh_host_ed25519_key-cert.pub ] && grep -q 'HostCertificate' /etc/ssh/sshd_config.d/05-cnode-fleet.conf 2>/dev/null && fcert=true
+  fleet="{\"ca\":$(js "$fca"),\"serial\":$(num "${fser:-}"),\"revoked\":$(num "${frev:-0}"),\"host_cert\":$fcert}"
+fi
+
+json="{\"hostname\":$(js "$host"),\"hardware\":${hardware},\"load\":${load},\"fleet\":${fleet}}"
 memtot="${mem_limit:-$mem_total}"
 line="${cpu_model:-cpu} ${cores}C/${threads}T eff ${eff}, $((memtot / 1024))G RAM, ${gline:-no GPU}$([ "$wsl" = true ] && echo ', WSL') | load ${l1}, mem $((mem_avail / 1024))G free${gload:+, $gload}, disk ${disk_line}, tmux ${tmux_line:--}${win_line}"
 

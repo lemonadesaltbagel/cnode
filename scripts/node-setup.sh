@@ -20,6 +20,11 @@
 #   --no-windows         WSL: leave Windows alone (no .wslconfig, boot task, firewall, pagefile)
 #   --no-elevate         WSL: never show a UAC prompt; record admin steps as pending
 #   --agent-sudo         let the node user run sudo without a password (NOPASSWD; off by default)
+#   --fleet-ca 'KEY'     join a fleet: trust certificates from this fleet CA (its public key line, or a
+#                        file holding it; printed by cnode fleet info on the admin). Control nodes of the
+#                        fleet log in without any per-node key, and the admin's  cnode fleet add-node
+#                        gives this node a host certificate. Kept on re-runs; --no-fleet removes it
+#   --no-fleet           leave the fleet (remove the CA trust, revocation list and host certificate)
 #   --gpu auto|yes|no    install the NVIDIA Container Toolkit (auto: if an NVIDIA GPU is visible)
 #   --wsl auto|yes|no    treat this as a WSL distro (auto-detected)
 #   --no-self-test       skip the GPU container self-test
@@ -31,6 +36,7 @@ set -euo pipefail
 SSH_PORT=2222; TARGET_USER="${SUDO_USER:-}"; CREATE_USER=0; SYNC_ROOTS=(); KEYS=(); KEY_ONLY=0; PW_ANYWHERE=0
 TAILSCALE=1; TS_KEY="${TS_AUTHKEY:-}"; TS_HOST=""
 DOCKER=1; GPU=auto; WSL=auto; SELF_TEST=1; SRC=""; WINDOWS=1; ELEVATE=1; AGENT_SUDO=0
+FLEET_CA=""; NO_FLEET=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --user) TARGET_USER="${2:?}"; shift 2 ;;
@@ -47,6 +53,8 @@ while [ $# -gt 0 ]; do
     --no-windows) WINDOWS=0; shift ;;
     --no-elevate) ELEVATE=0; shift ;;
     --agent-sudo) AGENT_SUDO=1; shift ;;
+    --fleet-ca) FLEET_CA="${2:?}"; shift 2 ;;
+    --no-fleet) NO_FLEET=1; shift ;;
     --gpu) GPU="${2:?}"; shift 2 ;;
     --wsl) WSL="${2:?}"; shift 2 ;;
     --no-self-test) SELF_TEST=0; shift ;;
@@ -86,6 +94,15 @@ ini_set() {
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
 [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || die "bad --port"
 [ "$KEY_ONLY" = 1 ] && [ "$PW_ANYWHERE" = 1 ] && die "--key-only and --password-anywhere exclude each other"
+if [ -n "$FLEET_CA" ]; then
+  [ "$NO_FLEET" = 0 ] || die "--fleet-ca and --no-fleet exclude each other"
+  [ -f "$FLEET_CA" ] && FLEET_CA="$(head -n1 "$FLEET_CA")"
+  case "$FLEET_CA" in *PRIVATE*) die "--fleet-ca wants the CA's public key line (cnode fleet info), not a private key" ;; esac
+  FLEET_CA="$(printf '%s\n' "$FLEET_CA" | awk 'NF>=2{print $1, $2; exit}')"
+  # (ssh-keygen may not be installed yet: the shape here, the key itself once the base packages are in)
+  [[ "$FLEET_CA" =~ ^(ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-rsa|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)\ [A-Za-z0-9+/]+=*$ ]] \
+    || die "--fleet-ca: not a public key line: $FLEET_CA"
+fi
 [ -r /etc/os-release ] || die "no /etc/os-release"
 # shellcheck disable=SC1091
 . /etc/os-release
@@ -172,6 +189,40 @@ else
   note "sudo asks for $TARGET_USER's password (agents cannot use it; --agent-sudo changes that)"
 fi
 
+FLEET_DIR=/etc/cnode/fleet; FLEET_DROPIN=/etc/ssh/sshd_config.d/05-cnode-fleet.conf; IN_FLEET=0
+if [ "$NO_FLEET" = 1 ]; then
+  say "Fleet: leaving"
+  if has_systemd; then systemctl disable --now cnode-fleet.path cnode-fleet.timer >/dev/null 2>&1 || true; fi
+  rm -f /etc/systemd/system/cnode-fleet.{path,service,timer}
+  [ -f /run/cnode-fleet-loop.pid ] && kill "$(cat /run/cnode-fleet-loop.pid)" 2>/dev/null; rm -f /run/cnode-fleet-loop.pid
+  rm -rf "$FLEET_DIR" "$FLEET_DROPIN" /etc/ssh/ssh_host_ed25519_key-cert.pub /usr/local/sbin/cn-fleet-apply
+  note "removed the fleet CA trust, revocation list and host certificate"
+elif [ -n "$FLEET_CA" ] || [ -f "$FLEET_DIR/ca.pub" ]; then
+  say "Fleet: control nodes log in with certificates from the fleet CA"
+  install -d -m 0755 "$FLEET_DIR" "$FLEET_DIR/principals"
+  if [ -n "$FLEET_CA" ]; then
+    printf '%s\n' "$FLEET_CA" | ssh-keygen -lf - >/dev/null 2>&1 || die "--fleet-ca: not a valid public key: $FLEET_CA"
+    if [ -f "$FLEET_DIR/ca.pub" ] && [ "$(awk '{print $1, $2}' "$FLEET_DIR/ca.pub")" != "$FLEET_CA" ]; then
+      warn "the fleet CA changes: dropping the old registry state and host certificate"
+      rm -f "$FLEET_DIR"/{serial,registry.signed,revoked.krl,revoked.spec} /etc/ssh/ssh_host_ed25519_key-cert.pub
+    fi
+    printf '%s cnode-fleet-ca\n' "$FLEET_CA" | write_if_changed "$FLEET_DIR/ca.pub" || true
+  fi
+  printf 'cnode-fleet %s\n' "$(awk '{print $1, $2}' "$FLEET_DIR/ca.pub")" | write_if_changed "$FLEET_DIR/allowed_signers" || true
+  # certificates are accepted for the node user only (principal "cnode"), never for other accounts
+  find "$FLEET_DIR/principals" -mindepth 1 -maxdepth 1 ! -name "$TARGET_USER" -exec rm -f {} +
+  echo cnode | write_if_changed "$FLEET_DIR/principals/$TARGET_USER" || true
+  printf 'USER=%s\nINBOX=%s\n' "$TARGET_USER" "$TARGET_HOME/.cnode/inbox" | write_if_changed "$FLEET_DIR/conf" || true
+  install -d -m 0700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.cnode" "$TARGET_HOME/.cnode/inbox"
+  [ -f "$SRC/node/cn-fleet-apply" ] || die "missing $SRC/node/cn-fleet-apply"
+  install -d -m 0755 /usr/local/sbin
+  if cmp -s "$SRC/node/cn-fleet-apply" /usr/local/sbin/cn-fleet-apply; then note "cn-fleet-apply unchanged"
+  else install -m 0755 "$SRC/node/cn-fleet-apply" /usr/local/sbin/cn-fleet-apply; note "installed /usr/local/sbin/cn-fleet-apply"; fi
+  /usr/local/sbin/cn-fleet-apply --configure || die "could not configure the fleet for sshd"
+  note "fleet CA $(ssh-keygen -lf "$FLEET_DIR/ca.pub" | awk '{print $2}'); sshd drop-in $FLEET_DROPIN"
+  IN_FLEET=1
+fi
+
 if [ "$KEY_ONLY" = 1 ]; then SSH_MODE='keys only'
 elif [ "$PW_ANYWHERE" = 1 ]; then SSH_MODE='password or key, from anywhere'
 else SSH_MODE='key; password only from private/Tailscale addresses'; fi
@@ -221,6 +272,52 @@ else
   else
     /usr/sbin/sshd && note "no systemd: started sshd directly"
   fi
+fi
+
+if [ "$IN_FLEET" = 1 ]; then
+  say "Fleet: apply updates from control nodes (revocations, host certificate)"
+  if has_systemd; then
+    cat >/etc/systemd/system/cnode-fleet.service <<'EOF'
+[Unit]
+Description=compute-node fleet: apply what control nodes dropped into the inbox
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cn-fleet-apply --quiet
+EOF
+    cat >/etc/systemd/system/cnode-fleet.path <<EOF
+[Unit]
+Description=compute-node fleet: watch the inbox of ${TARGET_USER}
+
+[Path]
+DirectoryNotEmpty=${TARGET_HOME}/.cnode/inbox
+Unit=cnode-fleet.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    cat >/etc/systemd/system/cnode-fleet.timer <<'EOF'
+[Unit]
+Description=compute-node fleet: apply the inbox every 5 minutes as well
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now cnode-fleet.path cnode-fleet.timer >/dev/null 2>&1 && note "cnode-fleet.path and .timer active" || warn "could not enable cnode-fleet.path"
+  else
+    # no systemd (container, or WSL before its next start): a small loop does the same
+    if [ -f /run/cnode-fleet-loop.pid ] && kill -0 "$(cat /run/cnode-fleet-loop.pid)" 2>/dev/null; then note "inbox loop running"
+    else
+      nohup setsid bash -c 'while :; do /usr/local/sbin/cn-fleet-apply --quiet; sleep 5; done' >/dev/null 2>&1 </dev/null &
+      echo $! >/run/cnode-fleet-loop.pid; note "no systemd: started the inbox loop (every 5 s)"
+    fi
+  fi
+  /usr/local/sbin/cn-fleet-apply --quiet || true
 fi
 
 say "Node commands: cn-status, cn-authorize"
@@ -386,7 +483,16 @@ echo "Compute node ready."
 echo "  join: host=${HOST_HINT} user=${TARGET_USER} port=${SSH_PORT} fingerprint=${FP}"
 [ "$WSL" = yes ] && [ -z "$TSNAME" ] && echo "  (WSL without Tailscale: other machines reach it only if Windows forwards the port, e.g. mirrored networking)"
 echo
-echo "On each control node (asks for ${TARGET_USER}'s password once, then installs its key):"
+if [ "$IN_FLEET" = 1 ]; then
+  NODE_NAME="$(hostname -s 2>/dev/null | tr 'A-Z_.' 'a-z--' | sed 's/[^a-z0-9-]//g; s/^[^a-z]*//' | cut -c1-31)"
+  echo "Fleet node. On the fleet admin run (once; every control node of the fleet then has it within a minute):"
+  echo "  cnode fleet add-node ${NODE_NAME:-<name>} --host ${HOST_HINT} --user ${TARGET_USER} --port ${SSH_PORT} --fingerprint ${FP}"
+  [ -f /etc/ssh/ssh_host_ed25519_key-cert.pub ] && echo "  (this node already has a host certificate from the fleet; re-adding it is harmless)"
+  echo
+  echo "Without the fleet, on each control node:"
+else
+  echo "On each control node (asks for ${TARGET_USER}'s password once, then installs its key):"
+fi
 echo "  curl -fsSL ${URL}/install.sh | bash -s -- control --name <name> --host ${HOST_HINT} --user ${TARGET_USER} --port ${SSH_PORT}"
 echo "  or, if cnode is already installed:  cnode add <name> --host ${HOST_HINT} --user ${TARGET_USER} --port ${SSH_PORT}"
 echo "  optional: add --fingerprint ${FP} to pin the host key instead of trusting it on first use"

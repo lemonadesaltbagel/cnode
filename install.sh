@@ -36,7 +36,7 @@ main() {
     trap 'rm -rf "$src"' EXIT
     local files=(scripts/"$role"-setup.sh node/cn-status)
     if [ "$role" = control ]; then files+=(bin/cnode templates/agent-rules.en.md templates/agent-rules.zh-CN.md)
-    else files+=(node/cn-authorize scripts/windows-setup.sh scripts/wincalc.sh); fi
+    else files+=(node/cn-authorize node/cn-fleet-apply scripts/windows-setup.sh scripts/wincalc.sh); fi
     ensure_fetcher
     local f
     for f in "${files[@]}"; do mkdir -p "$src/$(dirname "$f")"; fetch "$CN_RAW_URL/$f" "$src/$f"; done
