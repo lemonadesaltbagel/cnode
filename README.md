@@ -49,7 +49,7 @@ sync root. Tailscale's login prints a URL: open it once and log in. For an unatt
 an auth key: `... node --authkey tskey-auth-...`. Without Tailscale (LAN only): `--no-tailscale`.
 
 Other options: `--user NAME` (default: the user who ran sudo), `--create-user`, `--port 2222`,
-`--sync-root DIR` (repeatable), `--ts-hostname NAME`, `--key-only`, `--authorize 'KEY'`,
+`--sync-root DIR` (repeatable), `--ts-hostname NAME`, `--key-only`, `--password-anywhere`, `--authorize 'KEY'`,
 `--no-docker`, `--gpu auto|yes|no`, `--no-windows` (leave Windows alone), `--no-elevate` (no UAC
 prompt; admin steps are recorded as pending), `--agent-sudo` (see [sudo](#sudo-on-nodes)). For a GPU on plain Linux install the NVIDIA driver first; on
 WSL use the **Windows** NVIDIA driver (never a Linux driver inside WSL).
@@ -251,12 +251,13 @@ lets the agent run anything on the node without asking, and files it writes ther
 
 | Change | Where / why |
 |---|---|
-| sshd on port 2222 (not 22, so it never clashes with Windows' own OpenSSH), password or key login, no root login, more parallel sessions for agents | `/etc/ssh/sshd_config.d/10-compute-node.conf`. Ubuntu's `ssh.socket` is switched to `ssh.service` so the port applies. `--key-only` turns passwords off. |
+| sshd on port 2222 (not 22, so it never clashes with Windows' own OpenSSH), key login from anywhere, password login only from private, link-local, loopback and Tailscale addresses, no root login, more parallel sessions for agents | `/etc/ssh/sshd_config.d/10-compute-node.conf`. Ubuntu's `ssh.socket` is switched to `ssh.service` so the port applies. `--key-only` turns passwords off; `--password-anywhere` accepts them from public addresses too. |
 | Tailscale from Tailscale's apt repository, `tailscaled` running, `tailscale up` | Under systemd as a service; without systemd started directly; without a TUN device in userspace-networking mode. `--no-tailscale` skips it. |
 | Docker Engine from Docker's apt repository, user added to `docker` | Skipped if another `docker` exists (Docker Desktop integration, `docker.io`). Without systemd it is started with its init script. |
 | NVIDIA Container Toolkit (`--gpus all`) | Only when an NVIDIA GPU is visible. |
 | inotify limits for Mutagen and build tools | `/etc/sysctl.d/90-compute-node.conf` |
 | `nvidia-smi` for SSH sessions (WSL puts `/usr/lib/wsl/lib` on PATH only for local terminals) | `/usr/local/bin/nvidia-smi`, `/etc/profile.d/wsl-lib.sh` (WSL only) |
+| nvm in `rx` sessions: `rx` runs `bash -lc`, where `~/.bashrc` returns early, so the nvm lines its installer adds there never run and `node`/`npm` are missing | `/etc/profile.d/cnode-user-tools.sh` loads `~/.nvm/nvm.sh` in non-interactive bash login shells (interactive ones keep using `~/.bashrc`) |
 | Sync root `/Users` owned by the node user | Mirrors macOS paths. For a Linux control node add `--sync-root /home/<you>`. |
 | `cn-status`, `cn-authorize` | `/usr/local/bin`, settings in `/etc/compute-node.conf` |
 | Windows host (WSL only) | `.wslconfig` merge, boot task, Hyper-V firewall rule, pagefile: see [Windows side](#windows-side-wsl-nodes). State in `/etc/cnode/{windows.json,windows.env,pending.json}`. |
@@ -288,6 +289,7 @@ and never reboots; those are left to you, when nothing is running.
 | **Autostart**: scheduled task `WSL Compute Node`, trigger *At startup*, runs `wsl.exe -d <Distro> --exec /bin/sleep infinity` as you, whether or not anyone is logged on (asks for your Windows password once, not the PIN); systemd in the distro then starts sshd, Docker and Tailscale | `Register-ScheduledTask` | yes |
 | Hyper-V firewall rule `WSL-SSH-2222` (inbound to WSL with mirrored networking) | `New-NetFirewallHyperVRule` | yes |
 | Fixed-size pagefile, if the current one is too small (see below); needs a reboot | `Win32_PageFileSetting` | yes |
+| Never sleep or hibernate on AC power (battery settings unchanged), if the active power plan would | `powercfg /change standby-timeout-ac 0`, `hibernate-timeout-ac 0` | yes |
 
 The admin steps are written to `%USERPROFILE%\.cnode\windows-admin.ps1` and, when someone is at
 the terminal, run with `Start-Process -Verb RunAs` (**one UAC prompt** on the Windows desktop).
@@ -307,7 +309,7 @@ If Windows itself already runs Tailscale, the install does not add a second tail
 WSL: with mirrored networking the node is reached at the Windows machine's Tailscale name.
 
 Still up to you on Windows: installing WSL2 and a Debian/Ubuntu distro (`wsl --install -d Debian`),
-the Windows NVIDIA driver, power settings (a sleeping PC is not a compute node), and running
+the Windows NVIDIA driver, and running
 `wsl --shutdown` / rebooting when the pending list asks for it.
 
 ## Memory and the pagefile
@@ -355,10 +357,12 @@ install without the flag removes the file again.
 
 This tool favours easy deployment; harden it when you need to.
 
-- sshd accepts **passwords and keys** (no root login). The password is only needed once per
-  control node: `cnode add` logs in with it and installs that machine's key; all later traffic
-  uses the key. After all control nodes are added you can re-run the node install with
-  `--key-only` to turn passwords off.
+- sshd accepts **keys from anywhere and passwords only from private, link-local, loopback and
+  Tailscale addresses** (`Match Address` in the drop-in; no root login). The password is only
+  needed once per control node: `cnode add` logs in with it and installs that machine's key; all
+  later traffic uses the key. A control node on a public address uses `cn-authorize` instead, or
+  install the node with `--password-anywhere`. After all control nodes are added you can re-run
+  the node install with `--key-only` to turn passwords off.
 - Host keys are **trusted on first use** and then pinned per node in a dedicated known_hosts
   (`StrictHostKeyChecking yes`), so a *changed* key is refused (`cnode remove` + `cnode add` if it
   is expected). On a network you do not trust, pass `--fingerprint` from the join line so the
@@ -408,7 +412,7 @@ use the node's LAN IP (`--no-tailscale`).
 | `tailscale up` waits forever | Open the printed URL and log in, or re-run with `--authkey`. Check with `tailscale status`. |
 | `nvidia-smi: command not found` over SSH | Re-run the node setup (it links `nvidia-smi` into `/usr/local/bin`). |
 | `rx` or sync hangs or asks for a passphrase | The key's passphrase is not in the agent/keychain: `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` (macOS). |
-| `cnode add` fails at the password login | Wrong password, the node user has none (`sudo passwd <user>` on the node), or the node runs `--key-only`: use the `cnode key` line on the node instead. |
+| `cnode add` fails at the password login | Wrong password, the node user has none (`sudo passwd <user>` on the node), the node runs `--key-only`, or this machine connects from a public address (passwords are accepted only from private/Tailscale addresses): use the `cnode key` line on the node instead. |
 | Cannot connect to port 2222 | Is the node up (`tailscale status` on both sides)? Same tailnet? Without Tailscale on WSL see "LAN access" above. |
 | `host key ... CHANGED` / `Host key verification failed` | The node was reinstalled or you reached another machine. Check on the node (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`); if expected: `cnode remove <node>` and add it again. |
 | `sudo: a terminal is required` / agent stuck at sudo | Expected for agents: run `rx -n <node> sudo ...` yourself, or install with `--agent-sudo` (see [sudo](#sudo-on-nodes)). |

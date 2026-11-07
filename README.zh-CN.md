@@ -44,7 +44,7 @@ Docker Engine（检测到 GPU 时加装 NVIDIA Container Toolkit）、Tailscale�
 不用 Tailscale（只走局域网）：`--no-tailscale`。
 
 其他参数：`--user 用户名`（默认是执行 sudo 的用户）、`--create-user`、`--port 2222`、`--sync-root 目录`（可重复）、
-`--ts-hostname 名字`、`--key-only`、`--authorize '公钥'`、`--no-docker`、`--gpu auto|yes|no`、`--no-windows`（不动 Windows）、
+`--ts-hostname 名字`、`--key-only`、`--password-anywhere`、`--authorize '公钥'`、`--no-docker`、`--gpu auto|yes|no`、`--no-windows`（不动 Windows）、
 `--no-elevate`（不弹 UAC，管理员步骤记为待办）、`--agent-sudo`（见 [sudo](#节点上的-sudo)）。普通 Linux 上用 GPU 要先装好
 NVIDIA 驱动；WSL 上用 **Windows 版** NVIDIA 驱动（WSL 里不要装 Linux 驱动）。
 
@@ -232,12 +232,13 @@ ssh -t cn-gpu1 tmux attach -t train
 
 | 更改 | 位置 / 原因 |
 |---|---|
-| sshd 端口 2222（不用 22，避免和 Windows 自带的 OpenSSH 冲突）、密码或密钥登录、禁止 root、为 agent 调大并发会话 | `/etc/ssh/sshd_config.d/10-compute-node.conf`。Ubuntu 的 `ssh.socket` 会改成 `ssh.service`，端口才生效。`--key-only` 关闭密码登录。 |
+| sshd 端口 2222（不用 22，避免和 Windows 自带的 OpenSSH 冲突）、密钥登录不限来源，密码登录只接受私有网段、链路本地、本机和 Tailscale 地址，禁止 root，为 agent 调大并发会话 | `/etc/ssh/sshd_config.d/10-compute-node.conf`。Ubuntu 的 `ssh.socket` 会改成 `ssh.service`，端口才生效。`--key-only` 关闭密码登录；`--password-anywhere` 允许公网地址也用密码。 |
 | Tailscale 官方 apt 仓库的 Tailscale，运行 `tailscaled` 并 `tailscale up` | 有 systemd 时作为服务；没有 systemd 时直接启动；没有 TUN 设备时用 userspace-networking 模式。`--no-tailscale` 跳过。 |
 | Docker 官方 apt 仓库的 Docker Engine，用户加入 `docker` 组 | 已有其他来源的 `docker`（Docker Desktop 集成、`docker.io`）时跳过。没有 systemd 时用它的 init 脚本启动。 |
 | NVIDIA Container Toolkit（`--gpus all`） | 仅在检测到 NVIDIA GPU 时安装。 |
 | inotify 上限（Mutagen、构建工具） | `/etc/sysctl.d/90-compute-node.conf` |
 | 让 SSH 会话找到 `nvidia-smi`（WSL 只给本地终端加 `/usr/lib/wsl/lib`） | `/usr/local/bin/nvidia-smi`、`/etc/profile.d/wsl-lib.sh`（仅 WSL） |
+| 让 `rx` 会话能用 nvm：`rx` 用 `bash -lc` 执行，而 `~/.bashrc` 在非交互 shell 里开头就返回，nvm 安装时写在那里的加载行不会执行，`node`/`npm` 找不到 | `/etc/profile.d/cnode-user-tools.sh` 在非交互的 bash 登录 shell 里加载 `~/.nvm/nvm.sh`（交互 shell 仍走 `~/.bashrc`） |
 | 同步根目录 `/Users`，归节点用户所有 | 对应 macOS 路径。Linux 控制节点请加 `--sync-root /home/<你>`。 |
 | `cn-status`、`cn-authorize` | `/usr/local/bin`，设置在 `/etc/compute-node.conf` |
 | Windows 宿主（仅 WSL） | `.wslconfig` 合并、开机任务、Hyper-V 防火墙规则、页面文件：见 [Windows 一侧](#windows-一侧wsl-节点)。状态在 `/etc/cnode/{windows.json,windows.env,pending.json}`。 |
@@ -267,6 +268,7 @@ ssh -t cn-gpu1 tmux attach -t train
 | **开机自启**：计划任务 `WSL Compute Node`，触发器“启动时”，以你的账户运行 `wsl.exe -d <发行版> --exec /bin/sleep infinity`，无论是否有人登录（会问一次 Windows 密码，不是 PIN）；发行版里的 systemd 再拉起 sshd、Docker 和 Tailscale | `Register-ScheduledTask` | 是 |
 | Hyper-V 防火墙规则 `WSL-SSH-2222`（mirrored 网络下进入 WSL 的流量） | `New-NetFirewallHyperVRule` | 是 |
 | 页面文件太小时设为固定大小（见下文）；需要重启 | `Win32_PageFileSetting` | 是 |
+| 当前电源计划会睡眠或休眠时，改为接通电源时永不睡眠、永不休眠（电池设置不变） | `powercfg /change standby-timeout-ac 0`、`hibernate-timeout-ac 0` | 是 |
 
 管理员步骤写入 `%USERPROFILE%\.cnode\windows-admin.ps1`；有人在终端前时，用 `Start-Process -Verb RunAs` 运行（Windows 桌面上
 **一次 UAC 提示**）。如果提示被拒绝、无法弹出（没有终端、`--no-elevate`）或某步失败，该步骤会作为**待办**记录在
@@ -281,8 +283,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\<你>\.cnode\windo
 
 如果 Windows 本身已经运行 Tailscale，安装不会在 WSL 里再加一个 tailnet 节点：mirrored 网络下用 Windows 机器的 Tailscale 名字访问节点。
 
-仍需你在 Windows 上做的：安装 WSL2 和 Debian/Ubuntu 发行版（`wsl --install -d Debian`）、Windows 版 NVIDIA 驱动、电源设置（睡着的电脑
-当不了算力节点），以及在待办列表要求时执行 `wsl --shutdown` 或重启。
+仍需你在 Windows 上做的：安装 WSL2 和 Debian/Ubuntu 发行版（`wsl --install -d Debian`）、Windows 版 NVIDIA 驱动，以及在待办列表要求时执行 `wsl --shutdown` 或重启。
 
 ## 内存与页面文件
 
@@ -319,8 +320,9 @@ root 还能通过 `/mnt/c` 访问你的 Windows 文件。不带这个参数重�
 
 本工具优先考虑易部署，需要时再加固。
 
-- sshd 接受**密码和密钥**（禁止 root）。每个控制节点只需要用一次密码：`cnode add` 用它登录并装好该机的密钥，之后都走密钥。
-  所有控制节点都加好后，可以用 `--key-only` 重跑节点安装来关闭密码登录。
+- sshd **密钥登录不限来源，密码登录只接受私有网段、链路本地、本机和 Tailscale 地址**（配置里的 `Match Address`；禁止 root）。
+  每个控制节点只需要用一次密码：`cnode add` 用它登录并装好该机的密钥，之后都走密钥。处在公网地址的控制节点改用 `cn-authorize`，
+  或者用 `--password-anywhere` 安装节点。所有控制节点都加好后，可以用 `--key-only` 重跑节点安装来关闭密码登录。
 - 主机密钥**首次使用即信任**，之后按节点固定在专用 known_hosts 里（`StrictHostKeyChecking yes`），所以密钥**变化**会被拒绝
   （若是预期的变化：先 `cnode remove` 再 `cnode add`）。在不信任的网络里，传入 join 行里的 `--fingerprint`，第一次连接也会被验证。
 - 用 Tailscale 时，只有你 tailnet 里的机器能连到 2222 端口；用 `--no-tailscale` 时端口对局域网开放。
@@ -358,7 +360,7 @@ Linux 机器内部运行它，所以不需要改路由器或 Windows。笔记本
 | `tailscale up` 一直等待 | 打开打印的网址登录，或用 `--authkey` 重跑。用 `tailscale status` 检查。 |
 | 通过 SSH 执行时 `nvidia-smi: command not found` | 重跑节点安装（会把 `nvidia-smi` 链接到 `/usr/local/bin`）。 |
 | `rx` 或同步卡住、要求输入密码短语 | 密钥的密码短语不在 agent/钥匙串里：`ssh-add --apple-use-keychain ~/.ssh/id_ed25519`（macOS）。 |
-| `cnode add` 在密码登录这一步失败 | 密码错误、节点用户没有密码（在节点上 `sudo passwd <用户>`），或节点用了 `--key-only`：改为在节点上执行 `cnode key` 打印的那一行。 |
+| `cnode add` 在密码登录这一步失败 | 密码错误、节点用户没有密码（在节点上 `sudo passwd <用户>`），节点用了 `--key-only`，或本机从公网地址连接（密码只接受私有网段和 Tailscale 地址）：改为在节点上执行 `cnode key` 打印的那一行。 |
 | 连不上 2222 端口 | 节点在运行吗（两边 `tailscale status`）？在同一个 tailnet 吗？WSL 上不用 Tailscale 时见上文“局域网访问”。 |
 | `host key ... CHANGED` / `Host key verification failed` | 节点重装过，或连到了别的机器。在节点上核对（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`）；若是预期的：`cnode remove <节点>` 后重新添加。 |
 | `sudo: a terminal is required` / agent 卡在 sudo | 对 agent 来说是预期行为：你自己运行 `rx -n <节点> sudo ...`，或用 `--agent-sudo` 安装（见 [sudo](#节点上的-sudo)）。 |

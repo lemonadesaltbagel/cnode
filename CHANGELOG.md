@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- sshd: passwords are accepted again only from private, link-local, loopback and Tailscale
+  addresses (`Match Address`, as in the original setup); keys work from anywhere. The one-time
+  password login of `cnode add` keeps working on a LAN or tailnet. `--password-anywhere` restores
+  passwords from public addresses; `--key-only` is unchanged.
+- `rx` finds nvm's `node`/`npm`: `/etc/profile.d/cnode-user-tools.sh` loads `~/.nvm/nvm.sh` in
+  non-interactive bash login shells, where `~/.bashrc` returns before nvm's lines.
+- WSL nodes: the elevated Windows step also sets "never sleep / hibernate on AC power" (as the
+  original setup did) when the active power plan would sleep; otherwise a `power` pending step.
+  `windows.json` reports `never_sleep_on_ac`.
+- `cn-authorize`: its header no longer claims sshd is key-only.
+
 ## 0.3.0 - 2026-11-07
 
 Windows host care for WSL nodes, still started from inside WSL.

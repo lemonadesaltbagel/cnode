@@ -12,7 +12,9 @@
 #   --authkey KEY        Tailscale auth key for an unattended login (or env TS_AUTHKEY);
 #                        without it `tailscale up` prints a login URL to open once
 #   --ts-hostname NAME   machine name in the tailnet (default: the hostname)
-#   --key-only           refuse SSH passwords (default: passwords and keys both work)
+#   --key-only           refuse SSH passwords (default: keys from anywhere; passwords only from
+#                        private, link-local and Tailscale addresses, enough for the one-time key install)
+#   --password-anywhere  also accept passwords from public addresses (e.g. a cloud control node)
 #   --authorize 'KEY'    authorize a control node's public key for --user; repeatable
 #   --no-docker          skip Docker Engine (and the NVIDIA Container Toolkit)
 #   --no-windows         WSL: leave Windows alone (no .wslconfig, boot task, firewall, pagefile)
@@ -26,7 +28,7 @@
 # /etc/wsl.conf so it takes over at the distro's next start. Safe to re-run.
 set -euo pipefail
 
-SSH_PORT=2222; TARGET_USER="${SUDO_USER:-}"; CREATE_USER=0; SYNC_ROOTS=(); KEYS=(); KEY_ONLY=0
+SSH_PORT=2222; TARGET_USER="${SUDO_USER:-}"; CREATE_USER=0; SYNC_ROOTS=(); KEYS=(); KEY_ONLY=0; PW_ANYWHERE=0
 TAILSCALE=1; TS_KEY="${TS_AUTHKEY:-}"; TS_HOST=""
 DOCKER=1; GPU=auto; WSL=auto; SELF_TEST=1; SRC=""; WINDOWS=1; ELEVATE=1; AGENT_SUDO=0
 while [ $# -gt 0 ]; do
@@ -37,6 +39,7 @@ while [ $# -gt 0 ]; do
     --sync-root) SYNC_ROOTS+=("${2:?}"); shift 2 ;;
     --authorize) KEYS+=("${2:?}"); shift 2 ;;
     --key-only) KEY_ONLY=1; shift ;;
+    --password-anywhere) PW_ANYWHERE=1; shift ;;
     --no-tailscale) TAILSCALE=0; shift ;;
     --authkey) TS_KEY="${2:?}"; shift 2 ;;
     --ts-hostname) TS_HOST="${2:?}"; shift 2 ;;
@@ -82,6 +85,7 @@ ini_set() {
 
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
 [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || die "bad --port"
+[ "$KEY_ONLY" = 1 ] && [ "$PW_ANYWHERE" = 1 ] && die "--key-only and --password-anywhere exclude each other"
 [ -r /etc/os-release ] || die "no /etc/os-release"
 # shellcheck disable=SC1091
 . /etc/os-release
@@ -168,7 +172,10 @@ else
   note "sudo asks for $TARGET_USER's password (agents cannot use it; --agent-sudo changes that)"
 fi
 
-say "sshd on port $SSH_PORT ($([ "$KEY_ONLY" = 1 ] && echo 'keys only' || echo 'password or key'))"
+if [ "$KEY_ONLY" = 1 ]; then SSH_MODE='keys only'
+elif [ "$PW_ANYWHERE" = 1 ]; then SSH_MODE='password or key, from anywhere'
+else SSH_MODE='key; password only from private/Tailscale addresses'; fi
+say "sshd on port $SSH_PORT ($SSH_MODE)"
 install -d -m 0755 /etc/ssh/sshd_config.d
 if ! grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config; then
   sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config; note "added Include to sshd_config"
@@ -180,7 +187,7 @@ ssh_changed=0
 Port ${SSH_PORT}
 PermitRootLogin no
 PubkeyAuthentication yes
-PasswordAuthentication $([ "$KEY_ONLY" = 1 ] && echo no || echo yes)
+PasswordAuthentication $([ "$PW_ANYWHERE" = 1 ] && echo yes || echo no)
 KbdInteractiveAuthentication no
 # control nodes reuse connections (ControlMaster) and agents call in parallel
 MaxSessions 64
@@ -189,6 +196,14 @@ ClientAliveInterval 30
 ClientAliveCountMax 6
 AcceptEnv LANG LC_*
 EOF
+  # Passwords (used once by cnode add to install a key) only from private, link-local, loopback
+  # and Tailscale addresses. A Match block lasts to the end of this file, so it comes last.
+  if [ "$KEY_ONLY" = 0 ] && [ "$PW_ANYWHERE" = 0 ]; then
+    cat <<EOF
+Match Address 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10,127.0.0.0/8,::1,fc00::/7,fe80::/10
+    PasswordAuthentication yes
+EOF
+  fi
 } | write_if_changed /etc/ssh/sshd_config.d/10-compute-node.conf && ssh_changed=1
 [ -f /etc/ssh/ssh_host_ed25519_key ] || { ssh-keygen -A >/dev/null; note "generated host keys"; }
 install -d -m 0755 /run/sshd
@@ -320,6 +335,23 @@ if [ "$WSL" = yes ]; then
     | write_if_changed /etc/profile.d/wsl-lib.sh && note "wrote /etc/profile.d/wsl-lib.sh" || note "unchanged"
 fi
 
+say "Login shells for rx: load per-user tools that ~/.bashrc only loads interactively (nvm)"
+# rx runs commands with bash -lc. Debian/Ubuntu's ~/.bashrc returns early in non-interactive shells,
+# so anything set up below that line (nvm's installer puts itself there) is missing over rx.
+cat <<'EOF' | write_if_changed /etc/profile.d/cnode-user-tools.sh && note "wrote /etc/profile.d/cnode-user-tools.sh" || note "unchanged"
+# Managed by compute-node (scripts/node-setup.sh). rx runs commands in a non-interactive bash login
+# shell, where ~/.bashrc returns early; load nvm here so node/npm are found there too.
+if [ -n "${BASH_VERSION:-}" ]; then
+  case $- in
+    *i*) ;;
+    *) if [ -z "${NVM_BIN:-}" ] && [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+         export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+         . "$NVM_DIR/nvm.sh"
+       fi ;;
+  esac
+fi
+EOF
+
 say "Sync roots (control-node paths are mirrored 1:1): ${SYNC_ROOTS[*]}"
 for r in "${SYNC_ROOTS[@]}"; do
   case "$r" in /*) ;; *) die "--sync-root must be absolute: $r" ;; esac
@@ -359,6 +391,7 @@ echo "  curl -fsSL ${URL}/install.sh | bash -s -- control --name <name> --host $
 echo "  or, if cnode is already installed:  cnode add <name> --host ${HOST_HINT} --user ${TARGET_USER} --port ${SSH_PORT}"
 echo "  optional: add --fingerprint ${FP} to pin the host key instead of trusting it on first use"
 [ "$KEY_ONLY" = 1 ] && echo "  (--key-only: authorize each control node here with  cn-authorize '<line printed by cnode key>')"
+[ "$KEY_ONLY" = 0 ] && [ "$PW_ANYWHERE" = 0 ] && echo "  (passwords are accepted only from private and Tailscale addresses; from elsewhere use cn-authorize, or --password-anywhere)"
 if [ -s /etc/cnode/pending.json ] && grep -q '"id"' /etc/cnode/pending.json; then
   echo
   echo "PENDING WINDOWS STEPS (also shown by rx nodes --json; this installer never runs wsl --shutdown or reboots):"

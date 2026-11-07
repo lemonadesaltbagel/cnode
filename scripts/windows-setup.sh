@@ -11,7 +11,8 @@
 #   1. reads RAM, pagefiles, commit limit, disks, the boot task and Windows' Tailscale (no admin)
 #   2. merges %USERPROFILE%\.wslconfig (backup first): [wsl2] memory, swap, vmIdleTimeout=-1,
 #      networkingMode=mirrored, [experimental] autoMemoryReclaim=gradual; an explicit memory= is kept
-#   3. writes %USERPROFILE%\.cnode\windows-admin.ps1 (boot task, firewall rule, pagefile) and runs it
+#   3. writes %USERPROFILE%\.cnode\windows-admin.ps1 (boot task, firewall rule, pagefile, never sleep or
+#      hibernate on AC power) and runs it
 #      elevated (one UAC prompt) when an admin step is needed and someone is at the terminal
 #   4. records facts in /etc/cnode/windows.json and windows.env, open steps in /etc/cnode/pending.json
 # Test hooks: CN_POWERSHELL, CN_WSLPATH, CN_STATE_DIR.
@@ -86,6 +87,11 @@ if (\$svc) { 'tailscale_service=' + \$svc.Status }
 if (Test-Path \$exe) { \$j = (& \$exe status --json | Out-String | ConvertFrom-Json); 'tailscale_state=' + \$j.BackendState; 'tailscale_dns=' + \$j.Self.DNSName }
 \$fw = Get-NetFirewallHyperVRule -Name 'WSL-SSH-$PORT'
 'firewall_rule=' + [bool]\$fw
+# AC timeouts of the active power scheme; the last two hex values are AC then DC (locale-independent)
+foreach (\$k in @('STANDBYIDLE', 'HIBERNATEIDLE')) {
+  \$m = @(powercfg /query SCHEME_CURRENT SUB_SLEEP \$k | Select-String '0x[0-9a-fA-F]{8}\s*\$')
+  if (\$m.Count -ge 2) { 'power_' + \$k.ToLower() + '_ac=' + [Convert]::ToUInt32((\$m[-2].Line.Trim() -replace '.*0x', ''), 16) }
+}
 EOF
 }
 elevate_ps() {   # one UAC prompt: run windows-admin.ps1 elevated, wait, pass its exit code back
@@ -110,6 +116,7 @@ param(
   [bool]\$DoTask = $(b "$NEED_TASK"),
   [bool]\$DoFirewall = $(b "$NEED_FW"),
   [bool]\$DoPagefile = $(b "$NEED_PF"),
+  [bool]\$DoPower = $(b "$NEED_PWR"),
   [string]\$PagefileName = $(psq "$PF_DRIVE\\pagefile.sys"),
   [int]\$PagefileMB = $((PF_SIZE * 1024))
 )
@@ -177,6 +184,16 @@ if (\$DoPagefile) {
   } catch { \$results.Add('pagefile=fail ' + \$_.Exception.Message) }
 }
 
+if (\$DoPower) {
+  # A sleeping PC is not a compute node: never sleep or hibernate on AC power (battery unchanged).
+  try {
+    powercfg /change standby-timeout-ac 0
+    powercfg /change hibernate-timeout-ac 0
+    if (\$LASTEXITCODE -ne 0) { throw "powercfg exit code \$LASTEXITCODE" }
+    \$results.Add('power=ok')
+  } catch { \$results.Add('power=fail ' + \$_.Exception.Message) }
+}
+
 if (\$ResultPath) { \$results | Set-Content -Path \$ResultPath -Encoding ASCII }
 \$results | ForEach-Object { Write-Host \$_ }
 Start-Sleep -Seconds 4
@@ -184,7 +201,7 @@ EOF
 }
 
 if [ -n "$EMIT" ]; then   # tests: write the PowerShell texts with sample values, run nothing
-  DISTRO=Debian; ACCOUNT='PC\user'; NEED_TASK=1; NEED_FW=1; NEED_PF=1; PF_DRIVE=D:; PF_SIZE=55
+  DISTRO=Debian; ACCOUNT='PC\user'; NEED_TASK=1; NEED_FW=1; NEED_PF=1; NEED_PWR=1; PF_DRIVE=D:; PF_SIZE=55
   ADMIN_W='C:\Users\user\.cnode\windows-admin.ps1'; RESULT_W='C:\Users\user\.cnode\windows-admin.result'
   ADMIN_CMD="powershell -NoProfile -ExecutionPolicy Bypass -File \"$ADMIN_W\""
   mkdir -p "$EMIT"; facts_ps | crlf >"$EMIT/facts.ps1"; elevate_ps | crlf >"$EMIT/elevate.ps1"; admin_ps | crlf >"$EMIT/windows-admin.ps1"
@@ -249,6 +266,8 @@ TASK_ARGS="-d $DISTRO --exec /bin/sleep infinity"
 NEED_TASK=0; [ "$(fact task_args)" = "$TASK_ARGS" ] || NEED_TASK=1
 [ -n "$DISTRO" ] || { NEED_TASK=0; WARN+=("could not tell the WSL distro name; boot task skipped"); }
 NEED_FW=0; [ "$(fact firewall_rule)" = True ] || NEED_FW=1
+# unknown (no value read) counts as needed, like the other steps
+NEED_PWR=0; { [ "$(fact power_standbyidle_ac)" = 0 ] && [ "$(fact power_hibernateidle_ac)" = 0 ]; } || NEED_PWR=1
 NEED_PF=0; PF_DRIVE="-"; PF_SIZE=0; PF_CAPPED=0
 if awk -v t="$PF_TOTAL_GB" -v p="$P" 'BEGIN{exit !(t + 0.5 < p)}'; then
   disks=()
@@ -269,8 +288,8 @@ fi
 CN_DIR_W="$USERPROFILE_W\\.cnode"; CN_DIR_L="${UP_L:-}/.cnode"
 ADMIN_W="$CN_DIR_W\\windows-admin.ps1"; RESULT_W="$CN_DIR_W\\windows-admin.result"
 ADMIN_CMD="powershell -NoProfile -ExecutionPolicy Bypass -File \"$ADMIN_W\""
-TASK_DONE=0; FW_DONE=0; PF_DONE=0; ELEVATED="not needed"
-if [ $((NEED_TASK + NEED_FW + NEED_PF)) -gt 0 ] && [ -n "${UP_L:-}" ]; then
+TASK_DONE=0; FW_DONE=0; PF_DONE=0; PWR_DONE=0; ELEVATED="not needed"
+if [ $((NEED_TASK + NEED_FW + NEED_PF + NEED_PWR)) -gt 0 ] && [ -n "${UP_L:-}" ]; then
   install -d "$CN_DIR_L"
   # The script is kept on Windows so the same step can be run by hand later (see pending.json).
   admin_ps | crlf >"$CN_DIR_L/windows-admin.ps1"
@@ -284,6 +303,7 @@ if [ $((NEED_TASK + NEED_FW + NEED_PF)) -gt 0 ] && [ -n "${UP_L:-}" ]; then
       grep -qx 'task=ok' <<<"$r" && TASK_DONE=1
       grep -qx 'firewall=ok' <<<"$r" && FW_DONE=1
       grep -qx 'pagefile=ok' <<<"$r" && PF_DONE=1
+      grep -qx 'power=ok' <<<"$r" && PWR_DONE=1
       while IFS= read -r l; do case "$l" in *=fail*) warn "Windows: $l" ;; esac; done <<<"$r"
     fi
     note "elevated step: $ELEVATED"
@@ -304,6 +324,9 @@ fi
 if [ "$NEED_PF" = 1 ] && [ "$PF_DONE" = 0 ]; then
   padd pagefile "Set a fixed ${PF_SIZE} GB pagefile on ${PF_DRIVE} (commit limit RAM + pagefile), then reboot" "$ADMIN_CMD   (elevated PowerShell), then reboot Windows" admin+reboot
 fi
+if [ "$NEED_PWR" = 1 ] && [ "$PWR_DONE" = 0 ]; then
+  padd power "Never sleep or hibernate on AC power (a sleeping PC is not a compute node)" "$ADMIN_CMD   (elevated PowerShell)" admin
+fi
 if [ "$PF_DONE" = 1 ]; then
   padd reboot "Reboot Windows so the new pagefile takes effect" "Restart Windows when convenient" reboot
 fi
@@ -316,7 +339,7 @@ fi
 wj=""; for w in ${WARN[@]+"${WARN[@]}"}; do wj="${wj:+$wj,}$(js "$w")"; done
 pf_list=""; while IFS='|' read -r n a; do [ -n "$n" ] && pf_list="${pf_list:+$pf_list,}{\"name\":$(js "$n"),\"allocated_gb\":$(awk -v a="$a" 'BEGIN{printf "%.1f", a/1024}')}"; done < <(facts pagefile_usage)
 autostart="registered"; [ "$NEED_TASK" = 1 ] && [ "$TASK_DONE" = 0 ] && autostart="pending"
-printf '%s\n' "{\"available\":true,\"os\":$(js "$(fact os_caption)"),\"ram_gb\":$RAM_GB,\"pagefile_total_gb\":$PF_TOTAL_GB,\"pagefile_system_managed\":$([ "$PF_AUTO" = True ] && echo true || echo false),\"pagefiles\":[$pf_list],\"commit_limit_gb_at_install\":$CL_GB,\"recommended\":{\"wsl_memory_gb\":$M,\"wsl_swap_gb\":$SWAP,\"pagefile_gb\":$P,\"pagefile_drive\":$(js "$PF_DRIVE"),\"commit_limit_gb\":$(awk -v r="$RAM_GB" -v p="$P" 'BEGIN{printf "%.1f", r+p}')},\"wslconfig\":{\"path\":$(js "${USERPROFILE_W}\\.wslconfig"),\"memory\":$(js "$MEM_SET"),\"swap\":$(js "${SWAP}GB"),\"vmIdleTimeout\":\"-1\",\"networkingMode\":\"mirrored\",\"autoMemoryReclaim\":\"gradual\"},\"autostart\":$(js "$autostart"),\"tailscale_on_windows\":$([ "$TS_WIN" = 1 ] && echo true || echo false),\"admin_script\":$(js "$ADMIN_W"),\"warnings\":[$wj]}" >"$STATE/windows.json"
+printf '%s\n' "{\"available\":true,\"os\":$(js "$(fact os_caption)"),\"ram_gb\":$RAM_GB,\"pagefile_total_gb\":$PF_TOTAL_GB,\"pagefile_system_managed\":$([ "$PF_AUTO" = True ] && echo true || echo false),\"pagefiles\":[$pf_list],\"commit_limit_gb_at_install\":$CL_GB,\"recommended\":{\"wsl_memory_gb\":$M,\"wsl_swap_gb\":$SWAP,\"pagefile_gb\":$P,\"pagefile_drive\":$(js "$PF_DRIVE"),\"commit_limit_gb\":$(awk -v r="$RAM_GB" -v p="$P" 'BEGIN{printf "%.1f", r+p}')},\"wslconfig\":{\"path\":$(js "${USERPROFILE_W}\\.wslconfig"),\"memory\":$(js "$MEM_SET"),\"swap\":$(js "${SWAP}GB"),\"vmIdleTimeout\":\"-1\",\"networkingMode\":\"mirrored\",\"autoMemoryReclaim\":\"gradual\"},\"autostart\":$(js "$autostart"),\"never_sleep_on_ac\":$([ "$NEED_PWR" = 0 ] || [ "$PWR_DONE" = 1 ] && echo true || echo false),\"tailscale_on_windows\":$([ "$TS_WIN" = 1 ] && echo true || echo false),\"admin_script\":$(js "$ADMIN_W"),\"warnings\":[$wj]}" >"$STATE/windows.json"
 cat >"$STATE/windows.env" <<EOF
 WINDOWS_AVAILABLE=1
 WINDOWS_TAILSCALE=$TS_WIN

@@ -78,7 +78,7 @@ check "rx -> cnode symlink" test "$(readlink "$H1/.local/bin/rx")" = cnode
 check "wsync -> cnode symlink" test "$(readlink "$H1/.local/bin/wsync")" = cnode
 check "cn-status copy for rx nodes" test -f "$H1/.local/share/compute-node/cn-status"
 check "~/.ssh/config starts with the Include block" test "$(head -n1 "$H1/.ssh/config")" = "# BEGIN compute-node"
-check "~/.ssh/config mode 600" test "$(stat -f %Lp "$H1/.ssh/config" 2>/dev/null || stat -c %a "$H1/.ssh/config")" = 600
+check "~/.ssh/config mode 600" test "$(stat -c %a "$H1/.ssh/config" 2>/dev/null || stat -f %Lp "$H1/.ssh/config")" = 600
 check "registry line" grep -qx "wsl node1.example.test alice 2222" "$H1/.config/compute-node/nodes"
 check "default node is wsl" grep -qx wsl "$H1/.config/compute-node/default"
 check "pinned host key under alias cn-wsl" grep -q "^cn-wsl ssh-ed25519 " "$H1/.config/compute-node/known_hosts"

@@ -28,7 +28,9 @@ check "sshd drop-in written" test -f /etc/ssh/sshd_config.d/10-compute-node.conf
 check "sshd config valid" sshd -t
 check "port 2222" sh -c 'sshd -T -C user=tester,host=x,addr=8.8.8.8 | grep -qx "port 2222"'
 check "root login off" sh -c 'sshd -T -C user=tester,host=x,addr=8.8.8.8 | grep -qx "permitrootlogin no"'
-check "password login allowed by default" sh -c 'sshd -T -C user=tester,host=x,addr=8.8.8.8 | grep -qx "passwordauthentication yes"'
+check "default: passwords refused from a public address" sh -c 'sshd -T -C user=tester,host=x,addr=8.8.8.8 | grep -qx "passwordauthentication no"'
+check "default: passwords accepted from LAN, Tailscale and loopback" sh -c 'for a in 192.168.1.5 10.1.2.3 172.17.0.2 100.101.102.103 127.0.0.1 fd7a:115c:a1e0::1; do sshd -T -C user=tester,host=x,addr=$a | grep -qx "passwordauthentication yes" || exit 1; done'
+check "default: keys accepted from a public address" sh -c 'sshd -T -C user=tester,host=x,addr=8.8.8.8 | grep -qx "pubkeyauthentication yes"'
 check "warns that the new user has no password yet" sh -c 'printf "%s\n" "$1" | grep -q "no usable password"' _ "$OUT"
 check "--no-tailscale: no tailscale installed" sh -c '! dpkg-query -W tailscale >/dev/null 2>&1'
 check "--no-tailscale: join host is the LAN address" sh -c 'printf "%s\n" "$1" | grep -q "join: host=[0-9][0-9.]* user=tester"' _ "$OUT"
@@ -86,6 +88,19 @@ check "key login still works" ssh -p 2222 -i /root/ctl -o BatchMode=yes -o Stric
 bash /src/install.sh node --user tester --no-tailscale --no-docker >/dev/null 2>&1
 check "default run re-enables passwords" pwlogin tester@127.0.0.1 true
 check "sshd still running after reloads" pgrep -x sshd
+bash /src/install.sh node --user tester --password-anywhere --no-tailscale --no-docker >/dev/null 2>&1
+check "--password-anywhere: passwords from a public address too" sh -c 'sshd -T -C user=tester,host=x,addr=8.8.8.8 | grep -qx "passwordauthentication yes"'
+check "--key-only with --password-anywhere is refused" sh -c '! bash /src/install.sh node --user tester --key-only --password-anywhere --no-tailscale --no-docker >/dev/null 2>&1'
+bash /src/install.sh node --user tester --no-tailscale --no-docker >/dev/null 2>&1
+check "back to the default: public passwords refused again" sh -c 'sshd -T -C user=tester,host=x,addr=8.8.8.8 | grep -qx "passwordauthentication no"'
+
+echo "-- rx login shell loads nvm (~/.bashrc returns early in non-interactive shells)"
+su tester -c 'mkdir -p ~/.nvm/fake/bin && printf "#!/bin/sh\necho v0-fake\n" >~/.nvm/fake/bin/node && chmod +x ~/.nvm/fake/bin/node && printf "export NVM_BIN=\$HOME/.nvm/fake/bin; PATH=\$NVM_BIN:\$PATH\n" >~/.nvm/nvm.sh'
+RXSH=(ssh -p 2222 -i /root/ctl -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null tester@127.0.0.1)
+check "profile.d snippet installed" test -f /etc/profile.d/cnode-user-tools.sh
+check "node found over rx-style bash -lc" sh -c '[ "$("$@" "bash -lc node" 2>/dev/null)" = v0-fake ]' _ "${RXSH[@]}"
+check "no nvm: login shell still fine" sh -c 'su tester -c "mv ~/.nvm ~/.nvm-off" && "$@" "bash -lc true"; rc=$?; su tester -c "mv ~/.nvm-off ~/.nvm"; exit $rc' _ "${RXSH[@]}"
+check "sh -l (not bash) does not source nvm" sh -c '! su tester -c "sh -lc \"command -v node\"" | grep -q fake'
 
 echo "-- Tailscale (real package from pkgs.tailscale.com; daemon and login stubbed)"
 cat >/usr/local/bin/tailscale <<'TS'
@@ -138,11 +153,11 @@ case "$txt" in
     printf '%s\r\n' 'ram_bytes=33393377894' 'pagefile_auto=True' "commit_limit_kb=43096473" 'commit_free_kb=20971520' \
       'os_caption=Microsoft Windows 11 Pro 26100' 'pagefile_usage=C:\pagefile.sys|10240' 'disk=C:|107374182400' 'disk=D:|536870912000' \
       'userprofile=C:\Users\tester' 'account=PC\tester' "tailscale_service=${MOCK_TS:-Stopped}" "tailscale_state=${MOCK_TS:-Stopped}" \
-      'tailscale_dns=pc.tailnet.example.' 'firewall_rule=False' ;;
+      'tailscale_dns=pc.tailnet.example.' 'firewall_rule=False' "power_standbyidle_ac=${MOCK_STANDBY:-1800}" 'power_hibernateidle_ac=0' ;;
   *"# cnode:elevate"*)
     echo "elevate $MOCK_ELEVATE" >>/tmp/mock-ps.log
     [ "${MOCK_ELEVATE:-}" = accept ] || { echo 'declined: The operation was canceled by the user.'; exit 99; }
-    printf 'task=ok\r\nfirewall=ok\r\npagefile=ok\r\n' >/mnt/c/Users/tester/.cnode/windows-admin.result ;;
+    printf 'task=ok\r\nfirewall=ok\r\npagefile=ok\r\npower=ok\r\n' >/mnt/c/Users/tester/.cnode/windows-admin.result ;;
 esac
 exit 0
 MOCK
@@ -165,19 +180,21 @@ check ".wslconfig merged: explicit memory kept, others set, CRLF kept" sh -c 'f=
 check ".wslconfig backup made" sh -c 'ls /mnt/c/Users/tester/.wslconfig.bak-* >/dev/null'
 check "warns: memory=28GB above the recommended 24 GB" sh -c 'printf "%s\n" "$1" | grep -q "memory=28GB in .wslconfig is above the recommended 24 GB"' _ "$OUT6"
 check "windows.json: RAM 31.1, recommended M 24 / swap 6 / pagefile 55 on D:" jq -e '.ram_gb == 31.1 and .recommended.wsl_memory_gb == 24 and .recommended.wsl_swap_gb == 6 and .recommended.pagefile_gb == 55 and .recommended.pagefile_drive == "D:" and .autostart == "pending"' /etc/cnode/windows.json
-check "pending.json: autostart, firewall, pagefile, wsl-restart" sh -c '[ "$(jq -r "[.[].id] | join(\",\")" /etc/cnode/pending.json)" = "autostart,firewall,pagefile,wsl-restart" ]'
+check "pending.json: autostart, firewall, pagefile, power, wsl-restart" sh -c '[ "$(jq -r "[.[].id] | join(\",\")" /etc/cnode/pending.json)" = "autostart,firewall,pagefile,power,wsl-restart" ]'
+check "windows.json: sleeps on AC (standby 1800 s)" jq -e '.never_sleep_on_ac == false' /etc/cnode/windows.json
+check "admin script turns AC sleep and hibernate off" sh -c 'f=/mnt/c/Users/tester/.cnode/windows-admin.ps1; grep -q "DoPower = .true" $f && grep -q "standby-timeout-ac 0" $f && grep -q "hibernate-timeout-ac 0" $f'
 check "admin script saved on Windows with the computed values" sh -c 'f=/mnt/c/Users/tester/.cnode/windows-admin.ps1; grep -q "\$Distro = .TestDistro." $f && grep -q "PagefileName = .D:\\\\pagefile.sys." $f && grep -q "PagefileMB = 56320" $f && grep -q "Account = .PC\\\\tester." $f'
 check "install ends with the pending steps and the exact command" sh -c 'printf "%s\n" "$1" | grep -q "PENDING WINDOWS STEPS" && printf "%s\n" "$1" | grep -qF "$2"' _ "$OUT6" 'run: powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\tester\.cnode\windows-admin.ps1"'
 J="$(su tester -c 'cn-status --json')"
-check "cn-status: hardware.windows with commit limit and 4 pending steps" sh -c 'printf "%s\n" "$1" | jq -e ".hardware.windows.ram_gb == 31.1 and .hardware.windows.commit_limit_gb == 43.0 and (.hardware.windows.pending | length) == 4 and (.hardware.windows.warnings | length) >= 1"' _ "$J"
+check "cn-status: hardware.windows with commit limit and 5 pending steps" sh -c 'printf "%s\n" "$1" | jq -e ".hardware.windows.ram_gb == 31.1 and .hardware.windows.commit_limit_gb == 43.0 and (.hardware.windows.pending | length) == 5 and (.hardware.windows.warnings | length) >= 1"' _ "$J"
 check "cn-status: load.windows_commit_free_gb is live" sh -c 'printf "%s\n" "$1" | jq -e ".load.windows_commit_free_gb == 20.0"' _ "$J"
-check "cn-status line shows the pending steps" sh -c 'su tester -c "cn-status" | grep -q "4 PENDING"'
+check "cn-status line shows the pending steps" sh -c 'su tester -c "cn-status" | grep -q "5 PENDING"'
 echo '45088768 1048576' >/tmp/mock-commit
 check "low commit headroom becomes a live warning" sh -c 'su tester -c "cn-status --json" | jq -e ".load.windows_warnings[0] | test(\"low Windows commit headroom\")"'
 
 MOCK_ELEVATE=accept script -qec 'bash /src/install.sh node --user tester --wsl yes --no-docker --no-tailscale' /dev/null >/dev/null 2>&1
 check "with a terminal: one UAC launch" sh -c '[ "$(grep -c "^elevate accept" /tmp/mock-ps.log)" = 1 ]'
-check "accepted: autostart/firewall/pagefile done, reboot + wsl-restart pending" sh -c '[ "$(jq -r "[.[].id] | join(\",\")" /etc/cnode/pending.json)" = "reboot,wsl-restart" ] && jq -e ".autostart == \"registered\"" /etc/cnode/windows.json'
+check "accepted: autostart/firewall/pagefile/power done, reboot + wsl-restart pending" sh -c '[ "$(jq -r "[.[].id] | join(\",\")" /etc/cnode/pending.json)" = "reboot,wsl-restart" ] && jq -e ".autostart == \"registered\" and .never_sleep_on_ac == true" /etc/cnode/windows.json'
 echo '90282803 41943040' >/tmp/mock-commit       # after the reboot: limit 86.1 GB
 check "after the reboot the pagefile step disappears from cn-status" sh -c 'su tester -c "cn-status --json" | jq -e "[.hardware.windows.pending[].id] == [\"wsl-restart\"]"'
 OUT8="$(MOCK_ELEVATE=decline script -qec 'bash /src/install.sh node --user tester --wsl yes --no-docker --no-tailscale' /dev/null 2>&1)"

@@ -35,6 +35,8 @@ for f in facts elevate windows-admin cn-status-commit; do
 done
 check "windows-admin.ps1 registers the boot task like the original" sh -c 'grep -q "New-ScheduledTaskTrigger -AtStartup" "$1" && grep -q -- "--exec /bin/sleep infinity" "$1" && grep -q "RunLevel Limited" "$1"' _ "$W/windows-admin.ps1"
 check "windows-admin.ps1 sets a fixed pagefile (initial = maximum)" grep -q 'InitialSize = \[uint32\]$PagefileMB; MaximumSize = \[uint32\]$PagefileMB' "$W/windows-admin.ps1"
+check "windows-admin.ps1 turns off sleep and hibernate on AC only" sh -c 'grep -q "standby-timeout-ac 0" "$1" && grep -q "hibernate-timeout-ac 0" "$1" && ! grep -q "timeout-dc" "$1"' _ "$W/windows-admin.ps1"
+check "facts.ps1 reads the AC sleep timeouts" grep -q "powercfg /query SCHEME_CURRENT SUB_SLEEP" "$W/facts.ps1"
 check "the UAC launcher uses Start-Process -Verb RunAs and reports a decline" sh -c 'grep -q "Start-Process -FilePath powershell.exe -Verb RunAs" "$1" && grep -q "exit 99" "$1"' _ "$W/elevate.ps1"
 check "no reboot and no wsl --shutdown in any generated script" sh -c '! grep -qiE "Restart-Computer|shutdown(\.exe)? /r|wsl(\.exe)? --shutdown" "$1"/*.ps1' _ "$W"
 finish
