@@ -148,6 +148,30 @@ cmd_init() {
   ensure_include
 }
 
+# ---- sshd dropping connections before the handshake ------------------------------------------
+# OpenSSH 9.8+ (Debian 13) blocks a source address for a while after failed or unauthenticated
+# connections (PerSourcePenalties, up to 10 minutes); MaxStartups looks the same. The client then
+# only sees the connection closed during key exchange (and nothing at all with ssh -q).
+PENALTY_RE='kex_exchange_identification|Connection reset by|Connection closed by (remote host|[^ ]+ port [0-9]+)'
+penalty_short() { echo "sshd closed the connection before the handshake: probably blocking this address after failed logins (OpenSSH PerSourcePenalties, up to 10 min); wait, then retry once"; }
+penalty_hint() { # penalty_hint NODE
+  echo "${PROG}: node '$1' closed the connection before the SSH handshake. Its sshd is most likely" >&2
+  echo "${PROG}:   blocking this address for a while after failed or unauthenticated logins (OpenSSH 9.8+" >&2
+  echo "${PROG}:   PerSourcePenalties, up to 10 minutes; MaxStartups looks the same). Wait a few minutes and" >&2
+  echo "${PROG}:   retry once; quick retries do not help. Fix what failed first (wrong key, or no key yet:" >&2
+  echo "${PROG}:   run the 'cnode key' line on the node). Nothing on the node is broken." >&2
+}
+# probe_penalty NODE: after an ssh failure, check (one unauthenticated keyscan, the lightest
+# penalty) whether the node drops this address before the handshake; print the hint if so
+probe_penalty() {
+  local h p out
+  read -r _ h _ p _ <<<"$(node_line "$1")"
+  [ -n "${h:-}" ] || return 0
+  out="$(ssh-keyscan -T 5 -p "${p:-22}" "$h" 2>&1 >/dev/null)"
+  printf '%s\n' "$out" | grep -qE "$PENALTY_RE" && penalty_hint "$1"
+  return 0
+}
+
 # ---- host keys ---------------------------------------------------------------------------
 fingerprints_of() { ssh-keygen -lf "$1" 2>/dev/null | awk '{print $2}'; }
 
@@ -155,8 +179,12 @@ verify_host_key() { # verify_host_key NAME HOST PORT FINGERPRINT ACCEPT_NEW
   local n="$1" h="$2" p="$3" want="$4" al tmp ktmp fp line known=""
   al="$(alias_of "$n")"
   tmp="$(mktemp "${TMPDIR:-/tmp}/cnode.XXXXXX")"; ktmp="$tmp.k"
-  ssh-keyscan -T 5 -p "$p" -t ed25519,ecdsa,rsa "$h" 2>/dev/null | awk -v a="$al" 'NF>=3 && $1!~/^#/{ $1=a; print }' >"$tmp"
-  [ -s "$tmp" ] || { rm -f "$tmp"; die "could not read the SSH host key of $h:$p (is the node up and reachable?)"; }
+  ssh-keyscan -T 5 -p "$p" -t ed25519,ecdsa,rsa "$h" 2>"$ktmp.err" | awk -v a="$al" 'NF>=3 && $1!~/^#/{ $1=a; print }' >"$tmp"
+  if [ ! -s "$tmp" ]; then
+    grep -qE "$PENALTY_RE" "$ktmp.err" 2>/dev/null && penalty_hint "$n"
+    rm -f "$tmp" "$ktmp.err"; die "could not read the SSH host key of $h:$p (is the node up and reachable?)"
+  fi
+  rm -f "$ktmp.err"
   # Already trusted? (our known_hosts, or the user's own known_hosts from an earlier manual login)
   while read -r line; do
     printf '%s\n' "$line" >"$ktmp"; fp="$(fingerprints_of "$ktmp")"
@@ -252,6 +280,7 @@ cmd_add() {
     install_key "$n" "$u" "$al" || true
     ssh -O exit "$al" >/dev/null 2>&1 || true
     if ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$al" true 2>/dev/null; then
+      probe_penalty "$n"
       echo
       echo "Could not install this machine's key on '$n' with a password. Alternative: on the node, as $u, run"
       echo "    $(authorize_line)"
@@ -367,6 +396,7 @@ cmd_status() {
     [ "$rc" = 0 ] && [ -n "$nodejson" ] && ok=1
     err="$(tr -d '\r' <"$tmp/$i.err" 2>/dev/null | grep -v '^$' | tail -n1)"
     [ "$ok" = 0 ] && [ -z "$err" ] && err="exit code $rc"
+    [ "$ok" = 0 ] && printf '%s\n' "$err" | grep -qE "$PENALTY_RE" && err="$err ($(penalty_short))"
     rows="$(sync_rows "$n")"
     if [ "$json" = 1 ]; then
       [ "$first" = 1 ] || printf ','; first=0
@@ -438,6 +468,7 @@ cmd_rx() {
   ssh -q ${tty[@]+"${tty[@]}"} "$(alias_of "$node")" \
     "cd $qd 2>/dev/null || { echo \"rx: $qd does not exist on $node (run wsync -n $node in the project root)\" >&2; exit 125; }; exec bash -lc $(printf %q "$cmd")"
   local rc=$?
+  [ "$rc" = 255 ] && probe_penalty "$node"   # ssh -q prints nothing when sshd drops the connection
   [ -n "$sess" ] && [ -z "${RX_NO_PULL:-}" ] && mutagen sync flush "$sess" >/dev/null 2>&1
   return $rc
 }
@@ -480,10 +511,13 @@ cmd_wsync() {
   local name al ig=() i
   name="$(session_name "$node" "$d")"; al="$(alias_of "$node")"
   if mutagen sync list "$name" >/dev/null 2>&1; then echo "already syncing: $d <-> $node"; return 0; fi
-  ssh "$al" "mkdir -p $(printf %q "$d")" || die "cannot create $d on '$node' (is the sync root, e.g. /Users, present and owned by the node user?)"
+  if ! ssh "$al" "mkdir -p $(printf %q "$d")"; then
+    probe_penalty "$node"
+    die "cannot create $d on '$node' (is the sync root, e.g. /Users, present and owned by the node user?)"
+  fi
   for i in $IGNORES; do ig+=("--ignore=$i"); done
   mutagen sync create "$d" "$al:$d" --name="$name" --label "compute=$node" \
-    --sync-mode=two-way-resolved "${ig[@]}" || return 1
+    --sync-mode=two-way-resolved "${ig[@]}" || { probe_penalty "$node"; return 1; }
   mutagen sync flush "$name"
   echo "syncing: $d <-> $node:$d"
 }

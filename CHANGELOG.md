@@ -12,6 +12,11 @@
   original setup did) when the active power plan would sleep; otherwise a `power` pending step.
   `windows.json` reports `never_sleep_on_ac`.
 - `cn-authorize`: its header no longer claims sshd is key-only.
+- `rx`, `wsync` and `cnode add` explain when a node's sshd drops this machine before the SSH
+  handshake (OpenSSH 9.8+ `PerSourcePenalties` after failed logins): one unauthenticated
+  `ssh-keyscan` after an ssh failure, since `rx`'s `ssh -q` prints nothing then. `rx nodes`
+  appends the same note to the node's `error`. The agent rules say what it means and not to retry
+  in a loop.
 - Tests: the multinode run passes on Debian 13. Its nodes turn off OpenSSH 9.8+'s
   `PerSourcePenalties`, which blocked the one control container after the test's deliberate
   failed logins, and `cnode add n2` is no longer cut short by `| grep -q` (the key install kept

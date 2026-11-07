@@ -133,6 +133,27 @@ docker unpause "$N1" >/dev/null
 check "hung n1 reported as timed out" sh -c 'printf "%s\n" "$1" | docker exec -i '"$CTL"' jq -e ".[] | select(.name==\"n1\") | (.reachable == false and (.error | test(\"timed out\")))"' _ "$J"
 check "rx nodes returned after ~4s (${dt}s)" test "$dt" -le 7
 
+echo "-- a node blocking the control node after failed logins (OpenSSH 9.8+ PerSourcePenalties)"
+if docker exec "$N1" sh -c 'sshd -T 2>/dev/null | grep -q "^persourcepenalties "'; then
+  pen() { docker exec "$N1" sh -c "echo '$1' >/etc/ssh/sshd_config.d/00-test-no-penalties.conf && sshd -t && kill -HUP \$(cat /run/sshd.pid)"; sleep 1; }
+  pen 'PerSourcePenalties authfail:120 noauth:120 min:1'   # one failure is enough to be blocked
+  # no live SSH master to hide behind: Mutagen would reconnect at once and become the new master
+  as alice 'mutagen sync pause --label-selector compute=n1 && ssh -O exit cn-n1' >/dev/null 2>&1
+  as alice "ssh -o BatchMode=yes -o ControlPath=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 nobody-here@$N1 true" >/dev/null 2>&1
+  out="$(as alice 'cd /Users/alice/proj && rx -n n1 true' 2>&1)"; rc=$?
+  echo "$out" | sed 's/^/    | /'
+  check "rx: exit 255 and says why (ssh -q alone prints nothing)" sh -c '[ "$2" = 255 ] && printf "%s\n" "$1" | grep -q "closed the connection before the SSH handshake" && printf "%s\n" "$1" | grep -q PerSourcePenalties' _ "$out" "$rc"
+  J="$(as alice 'rx nodes --json')"
+  check "rx nodes --json: n1 unreachable, the error names the cause" sh -c 'printf "%s\n" "$1" | docker exec -i '"$CTL"' jq -e ".[] | select(.name==\"n1\") | (.reachable == false and (.error | test(\"PerSourcePenalties\")))"' _ "$J"
+  out="$(as alice 'mkdir -p /Users/alice/proj2 && cd /Users/alice/proj2 && wsync -n n1' 2>&1)"
+  check "wsync: says why" sh -c 'printf "%s\n" "$1" | grep -q "closed the connection before the SSH handshake"' _ "$out"
+  pen 'PerSourcePenalties no'                               # sshd re-executes on HUP: block lifted
+  as alice 'mutagen sync resume --label-selector compute=n1' >/dev/null 2>&1
+  check "rx works again once the block is lifted" as alice 'cd /Users/alice/proj && [ "$(rx -n n1 hostname)" = n1 ]'
+else
+  echo "  (sshd without PerSourcePenalties: skipped)"
+fi
+
 echo "-- cnode remove"
 check "alice: remove n2" as alice 'cnode remove n2'
 check "alice: n2 gone from list and ssh_config" as alice '! cnode list | grep -q "^  n2 " && ! grep -q cn-n2 ~/.config/compute-node/ssh_config'

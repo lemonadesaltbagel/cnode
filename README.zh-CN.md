@@ -361,7 +361,7 @@ Linux 机器内部运行它，所以不需要改路由器或 Windows。笔记本
 | 通过 SSH 执行时 `nvidia-smi: command not found` | 重跑节点安装（会把 `nvidia-smi` 链接到 `/usr/local/bin`）。 |
 | `rx` 或同步卡住、要求输入密码短语 | 密钥的密码短语不在 agent/钥匙串里：`ssh-add --apple-use-keychain ~/.ssh/id_ed25519`（macOS）。 |
 | `cnode add` 在密码登录这一步失败 | 密码错误、节点用户没有密码（在节点上 `sudo passwd <用户>`），节点用了 `--key-only`，或本机从公网地址连接（密码只接受私有网段和 Tailscale 地址）：改为在节点上执行 `cnode key` 打印的那一行。 |
-| 几次登录失败后出现 `kex_exchange_identification: Connection reset by peer` | OpenSSH 9.8 及以上（Debian 13）会在认证失败或未认证断开后暂时封锁该来源地址（`PerSourcePenalties`，最长 10 分钟）。等一会儿，先解决原因（密钥不对、还没装密钥）再重试；在节点上执行 `sshd -T \| grep persourcepenalties` 可查看设置。 |
+| `rx`/`wsync`/`cnode` 提示节点*在 SSH 握手前关闭了连接*；`rx nodes` 显示 `Connection reset by` 或 `Connection closed by` 并附 PerSourcePenalties 说明 | OpenSSH 9.8 及以上（Debian 13）会在认证失败或未认证断开后暂时封锁该来源地址（`PerSourcePenalties`，最长 10 分钟）。节点本身没坏。等一会儿，先解决原因（密钥不对、还没装密钥）再重试一次；在节点上执行 `sshd -T \| grep persourcepenalties` 可查看设置。已有的 SSH 主连接（之前的 `rx` 或 Mutagen 同步建立的）在此期间照常可用。`rx` 用的是 `ssh -q`，这种情况下什么都不打印，所以 ssh 失败（退出码 255）后它会用一次不认证的 `ssh-keyscan` 检查，并打印说明。 |
 | 连不上 2222 端口 | 节点在运行吗（两边 `tailscale status`）？在同一个 tailnet 吗？WSL 上不用 Tailscale 时见上文“局域网访问”。 |
 | `host key ... CHANGED` / `Host key verification failed` | 节点重装过，或连到了别的机器。在节点上核对（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`）；若是预期的：`cnode remove <节点>` 后重新添加。 |
 | `sudo: a terminal is required` / agent 卡在 sudo | 对 agent 来说是预期行为：你自己运行 `rx -n <节点> sudo ...`，或用 `--agent-sudo` 安装（见 [sudo](#节点上的-sudo)）。 |
