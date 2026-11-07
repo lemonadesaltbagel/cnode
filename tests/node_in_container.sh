@@ -147,7 +147,8 @@ cat >/usr/local/bin/mock-ps <<'MOCK'
 # stands in for powershell.exe: answers the three kinds of call windows-setup/cn-status make
 txt=""; prev=""
 for a in "$@"; do [ "$prev" = -EncodedCommand ] && txt="$(printf '%s' "$a" | base64 -d | iconv -f UTF-16LE -t UTF-8)"; prev="$a"; done
-case "$*" in *Get-CimInstance\ Win32_OperatingSystem*) [ -z "$txt" ] && { cat /tmp/mock-commit; exit 0; } ;; esac
+# cn-status: the commit query, plus live answers (/tmp/mock-live) for the checks it appends
+case "$*" in *Get-CimInstance\ Win32_OperatingSystem*) [ -z "$txt" ] && { echo "$*" >>/srv/mock/cim.log; cat /tmp/mock-commit; cat /tmp/mock-live 2>/dev/null; exit 0; } ;; esac
 case "$txt" in
   *"# cnode:facts"*)
     printf '%s\r\n' 'ram_bytes=33393377894' 'pagefile_auto=True' "commit_limit_kb=43096473" 'commit_free_kb=20971520' \
@@ -169,6 +170,7 @@ case "$1 $2" in
 esac
 MOCK
 chmod +x /usr/local/bin/mock-ps /usr/local/bin/mock-wslpath
+install -d -m 0777 /srv/mock   # cn-status runs as tester: its log must not sit in sticky /tmp (protected_regular)
 echo '45088768 20971520' >/tmp/mock-commit       # commit limit 43 GB, 20 GB free
 mkdir -p /mnt/c/Users/tester; printf '[wsl2]\r\nmemory=28GB\r\nprocessors=8\r\n' >/mnt/c/Users/tester/.wslconfig
 export CN_POWERSHELL=/usr/local/bin/mock-ps CN_WSLPATH=/usr/local/bin/mock-wslpath
@@ -197,8 +199,17 @@ check "with a terminal: one UAC launch" sh -c '[ "$(grep -c "^elevate accept" /t
 check "accepted: autostart/firewall/pagefile/power done, reboot + wsl-restart pending" sh -c '[ "$(jq -r "[.[].id] | join(\",\")" /etc/cnode/pending.json)" = "reboot,wsl-restart" ] && jq -e ".autostart == \"registered\" and .never_sleep_on_ac == true" /etc/cnode/windows.json'
 echo '90282803 41943040' >/tmp/mock-commit       # after the reboot: limit 86.1 GB
 check "after the reboot the pagefile step disappears from cn-status" sh -c 'su tester -c "cn-status --json" | jq -e "[.hardware.windows.pending[].id] == [\"wsl-restart\"]"'
+check "no admin step pending: cn-status makes only the quick commit query" sh -c 'rm -f /srv/mock/cim.log; su tester -c cn-status >/dev/null; grep -q Win32_OperatingSystem /srv/mock/cim.log && ! grep -qE "Get-ScheduledTask|NetFirewall|powercfg" /srv/mock/cim.log'
 OUT8="$(MOCK_ELEVATE=decline script -qec 'bash /src/install.sh node --user tester --wsl yes --no-docker --no-tailscale' /dev/null 2>&1)"
 check "declined UAC: admin steps recorded as pending again" sh -c 'printf "%s\n" "$1" | grep -q "declined" && jq -e "[.[].id] | index(\"autostart\") != null" /etc/cnode/pending.json' _ "$OUT8"
+check "pending admin steps are checked live (boot task, firewall rule for the port, AC power)" sh -c 'rm -f /srv/mock/cim.log; su tester -c cn-status >/dev/null; grep -q "Get-ScheduledTask -TaskName \"WSL Compute Node\"" /srv/mock/cim.log && grep -q "WSL-SSH-2222" /srv/mock/cim.log && grep -q powercfg /srv/mock/cim.log'
+check "not done on Windows yet: they stay pending" sh -c 'su tester -c "cn-status --json" | jq -e "[.hardware.windows.pending[].id] as \$p | (\$p | index(\"autostart\")) != null and (\$p | index(\"firewall\")) != null and (\$p | index(\"power\")) != null and .hardware.windows.autostart == \"pending\""'
+printf 'task=True\r\nfirewall=True\r\npower_standbyidle_ac=0\r\npower_hibernateidle_ac=0\r\n' >/tmp/mock-live   # windows-admin.ps1 run by hand
+J="$(su tester -c 'cn-status --json')"
+check "done by hand later: autostart, firewall, power drop out without a re-install" sh -c 'printf "%s\n" "$1" | jq -e "[.hardware.windows.pending[].id] == [\"wsl-restart\"]"' _ "$J"
+check "windows facts follow: autostart registered, never sleeps on AC" sh -c 'printf "%s\n" "$1" | jq -e ".hardware.windows.autostart == \"registered\" and .hardware.windows.never_sleep_on_ac == true"' _ "$J"
+check "the install-time commit-limit warning goes once the live limit is reached" sh -c 'grep -q "commit limit" /etc/cnode/windows.json && printf "%s\n" "$1" | jq -e "all(.hardware.windows.warnings[]; test(\"commit limit\") | not)"' _ "$J"
+rm -f /tmp/mock-live
 : >/tmp/ts.log
 OUT9="$(MOCK_TS=Running bash /src/install.sh node --user tester --wsl yes --no-docker 2>&1)"
 check "Windows runs Tailscale: no second tailnet node inside WSL" sh -c 'printf "%s\n" "$1" | grep -q "Windows already runs Tailscale" && ! grep -q "^tailscale up" /tmp/ts.log' _ "$OUT9"

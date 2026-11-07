@@ -33,6 +33,11 @@ Fleet: add a compute or control node once, every machine has it.
 
 Also:
 
+- `cn-status` / `rx nodes`: Windows admin steps done by hand after the install (the elevated
+  `windows-admin.ps1`) drop out of `pending` without a re-install: while `autostart`, `firewall` or
+  `power` is pending, the commit query also checks the boot task, the firewall rule and the AC
+  timeouts (same criteria as the install; only then, as the firewall module costs about 2 s).
+  `autostart`, `never_sleep_on_ac` and the install-time commit-limit warning follow the live state.
 - sshd: passwords are accepted again only from private, link-local, loopback and Tailscale
   addresses (`Match Address`, as in the original setup); keys work from anywhere. The one-time
   password login of `cnode add` keeps working on a LAN or tailnet. `--password-anywhere` restores

@@ -187,7 +187,7 @@ ssh -t cn-gpu1 tmux attach -t train
 | `load.gpus[]` | 每块 GPU（`index` 对应）：已用/剩余显存和利用率。 |
 | `load.disk[]` | 节点每个同步根目录的剩余空间。 |
 | `load.tmux` | 节点用户的 tmux 会话（用 `rx ... tmux new -d` 启动的任务）。 |
-| `hardware.windows` | 仅 WSL 节点（否则为 `null`）：Windows 宿主的内存、页面文件、提交限制（实时）、推荐值、`.wslconfig` 的值、`autostart`（`registered`/`pending`）、`warnings[]`，以及待办步骤 `pending[]`：每项有 `id`、`title`、`run`（要执行的准确命令）和 `needs`（`admin`、`reboot`、`wsl-shutdown`）。已明显完成的步骤（新内存上限已生效、提交限制已达到）会自动消失。 |
+| `hardware.windows` | 仅 WSL 节点（否则为 `null`）：Windows 宿主的内存、页面文件、提交限制（实时）、推荐值、`.wslconfig` 的值、`autostart`（`registered`/`pending`）、`warnings[]`，以及待办步骤 `pending[]`：每项有 `id`、`title`、`run`（要执行的准确命令）和 `needs`（`admin`、`reboot`、`wsl-shutdown`）。已明显完成的步骤无需重装就会自动消失：新内存上限已生效、提交限制已达到，以及（仅在仍待办时实时检查）开机任务已存在、防火墙规则已存在、接电源时不睡眠也不休眠；`autostart`、`never_sleep_on_ac` 和提交限制警告也随之更新。 |
 | `load.windows_commit_free_gb`、`load.windows_warnings[]` | 实时的 Windows 提交内存余量，以及余量偏低时的警告。任务必须同时放得进它和 `mem_available_mb`。 |
 | `sync[]` | 本控制节点与该节点之间的 Mutagen 会话（状态、冲突数、是否连接、是否暂停）。 |
 

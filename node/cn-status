@@ -124,15 +124,30 @@ CN_STATE="${CN_STATE_DIR:-/etc/cnode}"
 if [ -r "$CN_STATE/windows.json" ]; then
   wenv() { sed -n "s/^$1=//p" "$CN_STATE/windows.env" 2>/dev/null | head -n1; }
   wps="$(wenv POWERSHELL)"; wram="$(wenv RAM_GB)"; wpf="$(wenv PAGEFILE_GB)"; wmem="$(wenv WSL_MEMORY_GB)"
+  pids=" $(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$CN_STATE/pending.json" 2>/dev/null | tr '\n' ' ')"
+  wlive=""
   if [ -n "$wps" ] && [ -e "$wps" ] && has timeout; then
     sock="${WSL_INTEROP:-}"; [ -n "$sock" ] || sock="$(find /run/WSL -maxdepth 1 -name '*_interop' 2>/dev/null | sort | head -n1)"
+    # Admin steps someone did by hand after the install (elevated windows-admin.ps1) are checked
+    # live, with the install's criteria, but only while they are pending: the firewall module alone
+    # adds about 2 s, and rx nodes calls this on every node.
     # shellcheck disable=SC2016
-    read -r ckb fkb < <(WSL_INTEROP="$sock" timeout 8 "$wps" -NoProfile -NonInteractive -Command \
-      '$o = Get-CimInstance Win32_OperatingSystem; "$($o.TotalVirtualMemorySize) $($o.FreeVirtualMemory)"' </dev/null 2>/dev/null | tr -d '\r')
+    q='$o = Get-CimInstance Win32_OperatingSystem; "$($o.TotalVirtualMemorySize) $($o.FreeVirtualMemory)"'
+    # shellcheck disable=SC2016
+    case "$pids" in *" autostart "*) q="$q"'; "task=" + [bool](Get-ScheduledTask -TaskName "WSL Compute Node" -ErrorAction SilentlyContinue)' ;; esac
+    wport="$(sed -n 's/^SSH_PORT=//p' /etc/compute-node.conf 2>/dev/null | head -n1)"
+    case "$pids" in *" firewall "*) [[ "${wport:-}" =~ ^[0-9]+$ ]] && q="$q; \"firewall=\" + [bool](Get-NetFirewallHyperVRule -Name \"WSL-SSH-$wport\" -ErrorAction SilentlyContinue)" ;; esac
+    # shellcheck disable=SC2016
+    case "$pids" in *" power "*) q="$q"'; foreach ($k in @("STANDBYIDLE", "HIBERNATEIDLE")) { $m = @(powercfg /query SCHEME_CURRENT SUB_SLEEP $k | Select-String "0x[0-9a-fA-F]{8}\s*$"); if ($m.Count -ge 2) { "power_" + $k.ToLower() + "_ac=" + [Convert]::ToUInt32(($m[-2].Line.Trim() -replace ".*0x", ""), 16) } }' ;; esac
+    wout="$(WSL_INTEROP="$sock" timeout 8 "$wps" -NoProfile -NonInteractive -Command "$q" </dev/null 2>/dev/null | tr -d '\r')"
+    read -r ckb fkb <<<"$(printf '%s\n' "$wout" | head -n1)"
+    wlive="$(printf '%s\n' "$wout" | sed 1d)"
     case "${ckb:-}${fkb:-}" in ''|*[!0-9]*) ;; *)
       win_climit="$(awk -v k="$ckb" 'BEGIN{printf "%.1f", k/1048576}')"; win_cfree="$(awk -v k="$fkb" 'BEGIN{printf "%.1f", k/1048576}')" ;;
     esac
   fi
+  live() { printf '%s\n' "$wlive" | sed -n "s/^$1=//p" | head -n1; }
+  pf_ok() { [ -n "$win_climit" ] && [ -n "$wram" ] && awk -v c="$win_climit" -v r="$wram" -v p="$wpf" 'BEGIN{exit !(c + 1 >= r + p)}'; }
   memtot_gb="$(awk '/^MemTotal:/{printf "%d", $2/1048576 + 0.5}' /proc/meminfo)"
   items=""; npend=0
   while IFS= read -r l; do
@@ -140,7 +155,10 @@ if [ -r "$CN_STATE/windows.json" ]; then
     l="${l%,}"; id="$(printf '%s\n' "$l" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
     case "$id" in   # drop steps that are visibly done by now
       wsl-restart) [ -n "$wmem" ] && [ "$memtot_gb" -ge $((wmem - 1)) ] && [ "$memtot_gb" -le $((wmem + 1)) ] && continue ;;
-      pagefile|reboot) [ -n "$win_climit" ] && [ -n "$wram" ] && awk -v c="$win_climit" -v r="$wram" -v p="$wpf" 'BEGIN{exit !(c + 1 >= r + p)}' && continue ;;
+      pagefile|reboot) pf_ok && continue ;;
+      autostart) [ "$(live task)" = True ] && continue ;;
+      firewall) [ "$(live firewall)" = True ] && continue ;;
+      power) [ "$(live power_standbyidle_ac)" = 0 ] && [ "$(live power_hibernateidle_ac)" = 0 ] && continue ;;
     esac
     items="${items:+$items,}$l"; npend=$((npend + 1))
   done <"$CN_STATE/pending.json"
@@ -148,6 +166,14 @@ if [ -r "$CN_STATE/windows.json" ]; then
     win_warn="$(js "low Windows commit headroom: ${win_cfree} GB free of ${win_climit} GB")"
   fi
   wj="$(tr -d '\n' <"$CN_STATE/windows.json")"; wj="${wj%\}}"
+  # facts recorded at install time that are visibly out of date now
+  [ "$(live task)" = True ] && wj="${wj/\"autostart\":\"pending\"/\"autostart\":\"registered\"}"
+  [ "$(live power_standbyidle_ac)" = 0 ] && [ "$(live power_hibernateidle_ac)" = 0 ] && wj="${wj/\"never_sleep_on_ac\":false/\"never_sleep_on_ac\":true}"
+  if pf_ok && [[ "$wj" == *'"warnings":['* ]]; then   # (warnings is the last key of windows.json)
+    wl="${wj##*\"warnings\":[}"; wl="${wl%]}"
+    wl="$(printf '%s' "$wl" | sed 's/","/"\n"/g' | grep -v '^"Windows commit limit .* is below the recommended' | paste -sd, -)"
+    wj="${wj%\"warnings\":[*}\"warnings\":[${wl}]"
+  fi
   win_hw="${wj},\"commit_limit_gb\":$(num "$win_climit"),\"pending\":[${items}]}"
   win_line=" | Windows commit ${win_cfree:-?}/${win_climit:-?}G free$([ "$npend" -gt 0 ] && echo ", $npend PENDING STEP(S)")"
 fi

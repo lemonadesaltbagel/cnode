@@ -197,7 +197,7 @@ Example with placeholder values:
 | `load.gpus[]` | Per GPU (same `index`): memory used/free and utilization. |
 | `load.disk[]` | Free space on each sync root of the node. |
 | `load.tmux` | tmux sessions of the node user (jobs started with `rx ... tmux new -d`). |
-| `hardware.windows` | WSL nodes only (else `null`): the Windows host's RAM, pagefiles, commit limit (live), the recommended sizes, the `.wslconfig` values, `autostart` (`registered`/`pending`), `warnings[]` and `pending[]` steps, each with `id`, `title`, the exact command in `run`, and `needs` (`admin`, `reboot`, `wsl-shutdown`). Steps that are visibly done (new memory cap active, commit limit reached) drop out. |
+| `hardware.windows` | WSL nodes only (else `null`): the Windows host's RAM, pagefiles, commit limit (live), the recommended sizes, the `.wslconfig` values, `autostart` (`registered`/`pending`), `warnings[]` and `pending[]` steps, each with `id`, `title`, the exact command in `run`, and `needs` (`admin`, `reboot`, `wsl-shutdown`). Steps that are visibly done drop out without a re-install: the new memory cap is active, the commit limit is reached, and (checked live, only while pending) the boot task exists, the firewall rule exists, AC sleep and hibernate are off; `autostart`, `never_sleep_on_ac` and the commit-limit warning follow. |
 | `load.windows_commit_free_gb`, `load.windows_warnings[]` | Live Windows commit headroom (free commit memory) and a warning when it is low. A job must fit in both this and `mem_available_mb`. |
 | `sync[]` | This control node's Mutagen sessions with that node (status, conflicts, connected, paused). |
 
