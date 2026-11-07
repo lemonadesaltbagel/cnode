@@ -40,15 +40,18 @@ Two commands: one on the compute node, one on each laptop.
 curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | sudo bash -s -- node
 ```
 
-Run it in the WSL terminal (WSL2 must already be installed; nothing on the Windows side is
-changed) or on the Linux machine. It installs sshd on port 2222, Docker Engine (plus the NVIDIA
+Run it in the WSL terminal (WSL2 must already be installed) or on the Linux machine. On WSL it
+also prepares Windows through WSL interop: it merges `.wslconfig`, checks the pagefile, and with
+**one UAC prompt** on the Windows desktop registers the boot task, the firewall rule and (if
+needed) a larger pagefile; see [Windows side](#windows-side-wsl-nodes). It installs sshd on port 2222, Docker Engine (plus the NVIDIA
 Container Toolkit when a GPU is visible), Tailscale, `cn-status`/`cn-authorize`, and the `/Users`
 sync root. Tailscale's login prints a URL: open it once and log in. For an unattended install pass
 an auth key: `... node --authkey tskey-auth-...`. Without Tailscale (LAN only): `--no-tailscale`.
 
 Other options: `--user NAME` (default: the user who ran sudo), `--create-user`, `--port 2222`,
 `--sync-root DIR` (repeatable), `--ts-hostname NAME`, `--key-only`, `--authorize 'KEY'`,
-`--no-docker`, `--gpu auto|yes|no`. For a GPU on plain Linux install the NVIDIA driver first; on
+`--no-docker`, `--gpu auto|yes|no`, `--no-windows` (leave Windows alone), `--no-elevate` (no UAC
+prompt; admin steps are recorded as pending), `--agent-sudo` (see [sudo](#sudo-on-nodes)). For a GPU on plain Linux install the NVIDIA driver first; on
 WSL use the **Windows** NVIDIA driver (never a Linux driver inside WSL).
 
 It ends with a join line and the command for the laptop:
@@ -144,13 +147,28 @@ Example with placeholder values:
       "gpus": [{"index": 0, "vendor": "nvidia", "name": "<GPU name>", "mem_total_mb": 16000,
                 "driver": "<driver version>", "cuda": "<CUDA version>", "compute_cap": "<x.y>"}],
       "os": "Debian GNU/Linux 13 (trixie)", "kernel": "<kernel release>", "arch": "x86_64",
-      "wsl": true, "container": false
+      "wsl": true, "container": false,
+      "windows": {
+        "available": true, "os": "<Windows edition and build>", "ram_gb": 31.1,
+        "pagefile_total_gb": 55.5, "pagefile_system_managed": false,
+        "pagefiles": [{"name": "C:\\pagefile.sys", "allocated_gb": 23.5}, {"name": "D:\\pagefile.sys", "allocated_gb": 32.0}],
+        "commit_limit_gb_at_install": 86.0, "commit_limit_gb": 86.0,
+        "recommended": {"wsl_memory_gb": 24, "wsl_swap_gb": 6, "pagefile_gb": 55, "pagefile_drive": "D:", "commit_limit_gb": 86.1},
+        "wslconfig": {"path": "C:\\Users\\<you>\\.wslconfig", "memory": "24GB", "swap": "6GB", "vmIdleTimeout": "-1",
+                      "networkingMode": "mirrored", "autoMemoryReclaim": "gradual"},
+        "autostart": "registered", "tailscale_on_windows": false,
+        "admin_script": "C:\\Users\\<you>\\.cnode\\windows-admin.ps1",
+        "warnings": [],
+        "pending": [{"id": "wsl-restart", "title": "Restart WSL so .wslconfig (...) takes effect",
+                     "run": "wsl --shutdown   (in Windows, when nothing is running in WSL; ...)", "needs": "wsl-shutdown"}]
+      }
     },
     "load": {
       "loadavg": [0.5, 0.7, 0.9], "mem_available_mb": 18000,
       "gpus": [{"index": 0, "mem_used_mb": 1200, "mem_free_mb": 14800, "util_pct": 3}],
       "disk": [{"path": "/Users", "free_mb": 500000, "total_mb": 1000000}],
-      "tmux": ["train"], "uptime_s": 86400
+      "tmux": ["train"], "uptime_s": 86400,
+      "windows_commit_free_gb": 40.2, "windows_warnings": []
     },
     "sync": [{"session": "gpu1-0123456789", "path": "/Users/<you>/proj", "status": "Watching",
               "conflicts": 0, "connected": true, "paused": false}]
@@ -175,6 +193,8 @@ Example with placeholder values:
 | `load.gpus[]` | Per GPU (same `index`): memory used/free and utilization. |
 | `load.disk[]` | Free space on each sync root of the node. |
 | `load.tmux` | tmux sessions of the node user (jobs started with `rx ... tmux new -d`). |
+| `hardware.windows` | WSL nodes only (else `null`): the Windows host's RAM, pagefiles, commit limit (live), the recommended sizes, the `.wslconfig` values, `autostart` (`registered`/`pending`), `warnings[]` and `pending[]` steps, each with `id`, `title`, the exact command in `run`, and `needs` (`admin`, `reboot`, `wsl-shutdown`). Steps that are visibly done (new memory cap active, commit limit reached) drop out. |
+| `load.windows_commit_free_gb`, `load.windows_warnings[]` | Live Windows commit headroom (free commit memory) and a warning when it is low. A job must fit in both this and `mem_available_mb`. |
 | `sync[]` | This control node's Mutagen sessions with that node (status, conflicts, connected, paused). |
 
 The table form (`rx nodes`) prints the same as one line per node. On a node, `cn-status`,
@@ -219,8 +239,9 @@ alone. It tells an agent to: edit and search locally and run builds/tests/GPU wo
 run `rx nodes --json` before dispatching heavy work and choose by `hardware` (CPU model, effective
 CPUs, RAM, GPU model/memory/CUDA) and live `load`; never assume a node is idle; keep memory
 headroom (do not start a job on a node whose available RAM or GPU memory is below what the job
-needs plus a margin); start long jobs in tmux on the node under a unique name; read results from
-the synced folder. See [templates/agent-rules.en.md](templates/agent-rules.en.md). To skip
+needs plus a margin, or its Windows commit headroom); if a node reports pending Windows steps,
+tell the user the exact command first; never use sudo on a node (see [sudo](#sudo-on-nodes));
+start long jobs in tmux on the node under a unique name; read results from the synced folder. See [templates/agent-rules.en.md](templates/agent-rules.en.md). To skip
 permission prompts for `rx` in Claude Code you can allow `Bash(rx:*)` and `Bash(wsync:*)`; that
 lets the agent run anything on the node without asking, and files it writes there sync back.
 
@@ -238,6 +259,8 @@ lets the agent run anything on the node without asking, and files it writes ther
 | `nvidia-smi` for SSH sessions (WSL puts `/usr/lib/wsl/lib` on PATH only for local terminals) | `/usr/local/bin/nvidia-smi`, `/etc/profile.d/wsl-lib.sh` (WSL only) |
 | Sync root `/Users` owned by the node user | Mirrors macOS paths. For a Linux control node add `--sync-root /home/<you>`. |
 | `cn-status`, `cn-authorize` | `/usr/local/bin`, settings in `/etc/compute-node.conf` |
+| Windows host (WSL only) | `.wslconfig` merge, boot task, Hyper-V firewall rule, pagefile: see [Windows side](#windows-side-wsl-nodes). State in `/etc/cnode/{windows.json,windows.env,pending.json}`. |
+| `/etc/sudoers.d/90-cnode-<user>` | Only with `--agent-sudo`. |
 | systemd on WSL | `/etc/wsl.conf [boot] systemd=true` and `[user] default=`, used from the distro's next start; until then the services are started directly, so nothing has to be restarted now. |
 
 ### Control node (`scripts/control-setup.sh`, `bin/cnode`)
@@ -251,23 +274,82 @@ lets the agent run anything on the node without asking, and files it writes ther
 | Mutagen daemon, docker context per node | `docker context use <first node>` unless `--keep-docker-context`. |
 | Agent rules block in `~/.claude/CLAUDE.md` (+ `~/.codex/AGENTS.md`) | Between markers, replaced in place; `--no-agent-rules` skips. |
 
-## What still needs Windows (WSL nodes)
+## Windows side (WSL nodes)
 
-This tool changes nothing on the Windows side. What it cannot do from inside the distro:
+The install runs inside WSL; Windows is reached through WSL interop
+(`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`, called by full path because
+`powershell.exe` is often not on PATH in non-interactive shells). It never runs `wsl --shutdown`
+and never reboots; those are left to you, when nothing is running.
 
-- **WSL2 itself** must be installed, with a Debian or Ubuntu distro (`wsl --install -d Debian`).
-- **The distro must be running.** WSL stops a distro some seconds after its last Windows-side
-  process (terminal) exits, and stops the VM when idle; systemd services do not keep it alive, and
-  after a Windows reboot nothing starts it. Keep a WSL terminal open, or set it up yourself on
-  Windows: `vmIdleTimeout=-1` under `[wsl2]` in `%USERPROFILE%\.wslconfig` and a logon/boot task
-  that runs `wsl -d <Distro> --exec sleep infinity`.
-- **Sleep**: a sleeping PC is not a compute node (Windows power settings).
-- **GPU driver**: the Windows NVIDIA driver provides CUDA inside WSL.
-- **LAN access without Tailscale**: in WSL's default NAT mode other machines cannot reach the
-  distro; that needs Windows-side port forwarding or `networkingMode=mirrored` (plus a Hyper-V
-  firewall rule). Tailscale inside the distro avoids all of this.
-- If Windows itself runs Tailscale *and* WSL uses mirrored networking, the two can conflict; use
-  `--no-tailscale` and the Windows machine's Tailscale name in that case.
+| Step | How | Admin? |
+|---|---|---|
+| Read RAM, pagefiles, commit limit, disks, boot task, Windows' Tailscale | CIM queries | no |
+| Merge `%USERPROFILE%\.wslconfig` (backup `.wslconfig.bak-<time>` first; other keys kept): `[wsl2] memory=<M>GB`, `swap=<ceil(M/4)>GB`, `vmIdleTimeout=-1` (do not stop the idle VM), `networkingMode=mirrored` (WSL shares Windows' network interfaces), `[experimental] autoMemoryReclaim=gradual` (return freed cache to Windows). An explicit `memory=` you set is kept (with a warning if it is above M). Takes effect after `wsl --shutdown`. | file edit | no |
+| **Autostart**: scheduled task `WSL Compute Node`, trigger *At startup*, runs `wsl.exe -d <Distro> --exec /bin/sleep infinity` as you, whether or not anyone is logged on (asks for your Windows password once, not the PIN); systemd in the distro then starts sshd, Docker and Tailscale | `Register-ScheduledTask` | yes |
+| Hyper-V firewall rule `WSL-SSH-2222` (inbound to WSL with mirrored networking) | `New-NetFirewallHyperVRule` | yes |
+| Fixed-size pagefile, if the current one is too small (see below); needs a reboot | `Win32_PageFileSetting` | yes |
+
+The admin steps are written to `%USERPROFILE%\.cnode\windows-admin.ps1` and, when someone is at
+the terminal, run with `Start-Process -Verb RunAs` (**one UAC prompt** on the Windows desktop).
+If the prompt is declined, impossible (no terminal, `--no-elevate`) or a step fails, the step is
+recorded as **pending** in `/etc/cnode/pending.json` with the exact command:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\<you>\.cnode\windows-admin.ps1"   # elevated PowerShell
+```
+
+Pending steps (also `wsl --shutdown` after a `.wslconfig` change, and a reboot after a pagefile
+change) are printed at the end of the install and reported by `rx nodes --json` under
+`hardware.windows.pending`, so agents tell the user before starting heavy work there. Re-running
+the install refreshes them.
+
+If Windows itself already runs Tailscale, the install does not add a second tailnet node inside
+WSL: with mirrored networking the node is reached at the Windows machine's Tailscale name.
+
+Still up to you on Windows: installing WSL2 and a Debian/Ubuntu distro (`wsl --install -d Debian`),
+the Windows NVIDIA driver, power settings (a sleeping PC is not a compute node), and running
+`wsl --shutdown` / rebooting when the pending list asks for it.
+
+## Memory and the pagefile
+
+Windows' **commit limit** is physical RAM + pagefile. Everything that commits memory counts
+against it: Windows and its programs, the WSL VM (up to its `memory=` cap), and GPU shared memory.
+When the sum reaches the limit Windows cannot hand out more memory and the machine can crash or
+kill the WSL VM, even though "free RAM" looked fine. The install therefore sizes three things
+from the RAM:
+
+| | Formula | 31.1 GB RAM (worked example) |
+|---|---|---|
+| WSL memory cap `M` | `floor(RAM - max(6, 0.2 x RAM))` | 31.1 - 6.2 = 24.9 -> **24 GB** |
+| WSL swap | `ceil(M / 4)` | **6 GB** |
+| Total pagefile `P` | `round(RAM) + M`, fixed size (initial = maximum) | 31 + 24 = **55 GB** |
+| Commit limit | RAM + P | 31.1 + 55 = **about 86 GB** |
+
+This matches a machine that runs stable under full load: RAM 31.1 GB, WSL memory 24 GB, pagefile
+C: system-managed (23.5 GB allocated) + D: fixed 32 GB = 55.5 GB, commit limit 86 GB.
+
+Rules: the pagefile goes on the fixed drive with the most free space, which must keep 20 GB free
+afterwards; with less space it is capped at free - 20 GB and the install warns loudly (free disk
+space or lower `memory=`). If Windows managed the pagefile automatically, the system-managed one on
+C: is kept and the fixed one is added on the chosen drive. Existing pagefiles that already add up
+to P are left alone (system-managed ones count with their allocated size). The current state is
+read without admin rights (`Win32_ComputerSystem.AutomaticManagedPagefile`, `Win32_PageFileSetting`,
+`Win32_PageFileUsage`, `Win32_OperatingSystem.TotalVirtualMemorySize`/`FreeVirtualMemory`).
+
+## sudo on nodes
+
+Agents should not use `sudo`: it prompts for a password they cannot type. The rules block tells
+them to install into user space (`uv`, `pip --user`, `rustup`, `npm --prefix`, or
+`apt download <pkg>` + `dpkg-deb -x <pkg>.deb ~/.local/opt/<pkg>`) and, when root is truly needed,
+to ask you to run `rx -n <node> sudo ...` in your own terminal. `rx` allocates a TTY only when its
+stdin and stdout are terminals, so for you sudo prompts normally, and for an agent it fails fast
+instead of hanging.
+
+`--agent-sudo` on the node install writes `/etc/sudoers.d/90-cnode-<user>` with `NOPASSWD:ALL`
+for the node user, so agents can run `sudo` unattended. **Off by default**: it gives anyone who can
+reach the node as that user (every authorized control node, every agent on it) full root on the
+node, and on WSL root in the distro can reach your Windows files under `/mnt/c`. Re-running the
+install without the flag removes the file again.
 
 ## Security model
 
@@ -300,9 +382,9 @@ use the node's LAN IP (`--no-tailscale`).
 
 ## Limits
 
-- **WSL memory**: WSL gets at most a share of Windows' RAM (by default half) and competes with
-  Windows; `rx nodes` shows what is really available. Changing the cap is a Windows setting
-  (`memory=` in `.wslconfig`).
+- **WSL memory**: the VM is capped at `M` (see [Memory and the pagefile](#memory-and-the-pagefile))
+  and competes with Windows for RAM and commit memory; `rx nodes` shows both `mem_available_mb`
+  and `windows_commit_free_gb`.
 - **Containers as compute nodes**: a Docker or RunPod container can serve `rx`/`wsync` (sshd and
   tailscaled start without systemd, Tailscale in userspace mode), but it cannot run Docker Engine:
   unprivileged containers cannot create the namespaces and cgroups it needs, and cannot host user
@@ -319,13 +401,17 @@ use the node's LAN IP (`--no-tailscale`).
 
 | Symptom | Cause / fix |
 |---|---|
-| The node is unreachable after a while (WSL) | The distro or the WSL VM stopped; see "What still needs Windows". Open a WSL terminal to start it again. |
+| The node is unreachable after a while (WSL) | The distro or the WSL VM stopped: is the boot task registered (`hardware.windows.autostart`) and was `wsl --shutdown` done after the `.wslconfig` change (`vmIdleTimeout=-1`)? Start it again with `Start-ScheduledTask "WSL Compute Node"` or a WSL terminal. |
+| The whole PC crashes or WSL dies under heavy load | Commit limit exhausted: check `hardware.windows.pending`/`warnings` and `load.windows_commit_free_gb`; run the pagefile step and reboot (see [Memory and the pagefile](#memory-and-the-pagefile)). |
+| The UAC prompt did not appear or was declined | The steps are pending: run the printed `powershell ... windows-admin.ps1` command in an elevated PowerShell, or re-run the node install from a WSL terminal. |
+| Windows password changed | The boot task stores it: run `windows-admin.ps1` again (elevated) after deleting the task, or re-run the install. |
 | `tailscale up` waits forever | Open the printed URL and log in, or re-run with `--authkey`. Check with `tailscale status`. |
 | `nvidia-smi: command not found` over SSH | Re-run the node setup (it links `nvidia-smi` into `/usr/local/bin`). |
 | `rx` or sync hangs or asks for a passphrase | The key's passphrase is not in the agent/keychain: `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` (macOS). |
 | `cnode add` fails at the password login | Wrong password, the node user has none (`sudo passwd <user>` on the node), or the node runs `--key-only`: use the `cnode key` line on the node instead. |
 | Cannot connect to port 2222 | Is the node up (`tailscale status` on both sides)? Same tailnet? Without Tailscale on WSL see "LAN access" above. |
 | `host key ... CHANGED` / `Host key verification failed` | The node was reinstalled or you reached another machine. Check on the node (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`); if expected: `cnode remove <node>` and add it again. |
+| `sudo: a terminal is required` / agent stuck at sudo | Expected for agents: run `rx -n <node> sudo ...` yourself, or install with `--agent-sudo` (see [sudo](#sudo-on-nodes)). |
 | `rx: ... does not exist on <node>` | The folder is not synced to that node: `wsync -n <node>` in the project root. |
 | `tailscale ping` shows `via DERP` | Relayed, not direct: same LAN? UDP 41641 blocked by the router? |
 | Sync conflicts | The control node wins; inspect with `wsync -l` or `mutagen sync monitor`. |
@@ -348,8 +434,18 @@ sudo rm /etc/ssh/sshd_config.d/10-compute-node.conf /etc/sysctl.d/90-compute-nod
         /usr/local/bin/cn-status /usr/local/bin/cn-authorize /etc/profile.d/wsl-lib.sh /usr/local/bin/nvidia-smi
 sudo systemctl restart ssh   # or disable it: sudo systemctl disable --now ssh
 sudo tailscale logout; sudo apt-get purge tailscale
+sudo rm -rf /etc/cnode /etc/sudoers.d/90-cnode-*
 sudo apt-get purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin nvidia-container-toolkit
 # /Users holds synced copies of your projects; delete it once you no longer need them
+```
+
+Windows (elevated PowerShell; only what the install added):
+```powershell
+Unregister-ScheduledTask -TaskName 'WSL Compute Node' -Confirm:$false
+Remove-NetFirewallHyperVRule -Name WSL-SSH-2222
+# pagefile back to automatic (takes effect after a reboot):
+$cs = Get-CimInstance Win32_ComputerSystem; Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $true }
+# .wslconfig: restore %USERPROFILE%\.wslconfig.bak-<time> if you want the old one; remove %USERPROFILE%\.cnode
 ```
 
 ## Repository layout
@@ -357,6 +453,8 @@ sudo apt-get purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
 ```
 install.sh                entry point for both roles (curl | bash), fetches what it needs
 scripts/node-setup.sh     compute-node setup (Debian/Ubuntu, inside WSL or plain Linux)
+scripts/windows-setup.sh  Windows side of a WSL node, through interop (called by node-setup)
+scripts/wincalc.sh        memory/pagefile formula and .wslconfig merge (sourced)
 scripts/control-setup.sh  control-node setup (macOS/Linux)
 bin/cnode                 rx, wsync (symlinks to it), the node registry and status
 node/cn-status            node hardware/load snapshot (also piped over SSH by rx nodes)
@@ -372,6 +470,12 @@ The installers download from `https://raw.githubusercontent.com/lemonadesaltbage
 `tests/run.sh` runs everything without touching real machines:
 
 - `lint`: shellcheck and `bash -n` for every script, CRLF and download-URL checks.
+- `unit`: the memory/swap/pagefile formula for several RAM sizes, the disk-space cap, size
+  parsing, and the `.wslconfig` merge (idempotent, backup, explicit `memory=` and other keys kept,
+  CRLF kept).
+- `ps`: parse-only check (never executed) of the generated PowerShell: the facts query, the UAC
+  launcher, `windows-admin.ps1` and cn-status' commit query, with Windows PowerShell 5.1 via WSL
+  interop or pwsh.
 - `control`: the control-node install in throwaway HOMEs with ssh/mutagen/docker/brew stubbed:
   files written, agent rules (default on, `--no-agent-rules`, AGENTS.md), trust on first use and
   refusal of a changed host key, wrong `--fingerprint` refused, the one-time password login that
@@ -381,14 +485,17 @@ The installers download from `https://raw.githubusercontent.com/lemonadesaltbage
 - `node`: the compute-node install in fresh `debian:13` and `ubuntu:24.04` containers (no systemd,
   no TUN): password and key login, `--key-only`, Docker packages, the real Tailscale package with
   its daemon and login stubbed (auth key, userspace mode, join host, no-key fallback),
-  `--no-tailscale`, cn-authorize, the WSL `wsl.conf` path, idempotency.
+  `--no-tailscale`, cn-authorize, the WSL `wsl.conf` path, the Windows side with mocked interop
+  (`.wslconfig` merge and backup, pending steps, UAC accepted/declined, simulated reboot, Windows
+  Tailscale detection, `pending.json` -> `cn-status --json`), `--agent-sudo`, idempotency.
 - `multinode`: two compute-node containers and a control container with two users, all real
   (ssh, Mutagen): `cnode add` with a password installing the key, TOFU and pinned fingerprints,
   the manual `cn-authorize` path, `wsync -n` of one folder to both nodes, `rx -n`, `rx nodes --json`
   with one node stopped and one hung.
 
 Docker tests use the current docker context and skip themselves when the engine has less than
-`MIN_AVAILABLE_MB` (6000) free. No test uses a GPU.
+`MIN_AVAILABLE_MB` (7000) free; containers are memory-limited (1 GB / 512 MB). No test uses a GPU
+or touches the real Windows host (its `.wslconfig`, pagefile or scheduled tasks).
 
 ## License
 

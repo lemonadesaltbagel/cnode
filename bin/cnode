@@ -25,7 +25,7 @@
 #        CN_NO_DOCKER=1 (cnode add/remove: leave docker contexts alone)
 set -uo pipefail
 
-CN_VERSION="0.2.0"
+CN_VERSION="0.3.0"
 CN_HOME="${CN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/compute-node}"
 NODES_FILE="$CN_HOME/nodes"
 DEFAULT_FILE="$CN_HOME/default"

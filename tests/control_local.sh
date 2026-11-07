@@ -33,8 +33,8 @@ stub ssh 'case "$*" in
   *cn-pw*" true") [ -f "$STATE/pw-authorized" ] ;;
   *" true") exit 0 ;;
   *"bash -s -- --both"*) cat >/dev/null
-    echo "Test CPU 4C/8T eff 8, 31G RAM, no GPU | load 0.10, mem 20G free, disk /Users:100G, tmux -"
-    echo "{\"hostname\":\"stub\",\"hardware\":{\"cpu_model\":\"Test CPU\",\"cpu_cores\":4,\"cpu_threads\":8,\"cpus_effective\":8,\"mem_total_mb\":32000,\"gpus\":[]},\"load\":{\"loadavg\":[0.1,0.1,0.1],\"mem_available_mb\":20000,\"gpus\":[],\"disk\":[],\"tmux\":[]}}" ;;
+    echo "Test CPU 4C/8T eff 8, 31G RAM, no GPU | load 0.10, mem 20G free, disk /Users:100G, tmux - | Windows commit 30/86G free, 1 PENDING STEP(S)"
+    echo "{\"hostname\":\"stub\",\"hardware\":{\"cpu_model\":\"Test CPU\",\"cpu_cores\":4,\"cpu_threads\":8,\"cpus_effective\":8,\"mem_total_mb\":32000,\"gpus\":[],\"windows\":{\"ram_gb\":31.1,\"pending\":[{\"id\":\"reboot\",\"run\":\"Restart Windows\"}]}},\"load\":{\"loadavg\":[0.1,0.1,0.1],\"mem_available_mb\":20000,\"gpus\":[],\"disk\":[],\"tmux\":[],\"windows_commit_free_gb\":30.0}}" ;;
   *"mkdir -p"*) exit 0 ;;
   *"exit\ 7"*) exit 7 ;;
   *) echo "REMOTE: $*" ;;
@@ -162,11 +162,12 @@ check "rx warns outside a synced folder" sh -c "echo \"\$1\" | grep -q 'not sync
 echo "-- rx nodes"
 OUT="$(as_user "$H1" rx nodes --json 2>&1)"
 if command -v python3 >/dev/null 2>&1; then
-  check "rx nodes --json is valid JSON with 2 nodes" python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert len(d)==2 and all(n['reachable'] for n in d) and d[0]['hardware']['cpus_effective']==8 and d[0]['load']['mem_available_mb']==20000 and d[0]['hostname']=='stub' and len(d[0]['sync'])==1" "$OUT"
+  check "rx nodes --json is valid JSON with 2 nodes" python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert len(d)==2 and all(n['reachable'] for n in d) and d[0]['hardware']['cpus_effective']==8 and d[0]['load']['mem_available_mb']==20000 and d[0]['hostname']=='stub' and d[0]['hardware']['windows']['pending'][0]['id']=='reboot' and d[0]['load']['windows_commit_free_gb']==30.0 and len(d[0]['sync'])==1" "$OUT"
 else
   check "rx nodes --json mentions both nodes" sh -c "echo \"\$1\" | grep -q '\"name\":\"gpu2\"'" _ "$OUT"
 fi
 OUT="$(as_user "$H1" rx nodes 2>&1)"; echo "$OUT" | sed 's/^/    | /'
+check "rx nodes table shows pending Windows steps" sh -c "echo \"\$1\" | grep -q '1 PENDING STEP'" _ "$OUT"
 check "rx nodes table lists sync sessions" sh -c "echo \"\$1\" | grep -q 'sync $P: Watching'" _ "$OUT"
 
 echo "-- cnode remove"

@@ -118,11 +118,45 @@ if has tmux; then
 fi
 up="$(awk '{print int($1)}' /proc/uptime)"
 
-hardware="{\"cpu_model\":$(js "$cpu_model"),\"cpu_cores\":$(num "$cores"),\"cpu_threads\":$(num "$threads"),\"cpus_effective\":$(num "$eff"),\"mem_total_mb\":$(num "$mem_total"),\"mem_limit_mb\":$(num "$mem_limit"),\"gpus\":[${ghw}],\"os\":$(js "$os"),\"kernel\":$(js "$kernel"),\"arch\":$(js "$arch"),\"wsl\":$wsl,\"container\":$container}"
-load="{\"loadavg\":[$(num "$l1"),$(num "$l5"),$(num "$l15")],\"mem_available_mb\":$(num "$mem_avail"),\"gpus\":[${gld}],\"disk\":[${disk_json}],\"tmux\":[${tmux_json}],\"uptime_s\":$(num "$up")}"
+# ---------------- Windows host of a WSL node (written by node-setup into /etc/cnode) ----------------
+win_hw=null; win_cfree=""; win_climit=""; win_warn=""; win_line=""
+CN_STATE="${CN_STATE_DIR:-/etc/cnode}"
+if [ -r "$CN_STATE/windows.json" ]; then
+  wenv() { sed -n "s/^$1=//p" "$CN_STATE/windows.env" 2>/dev/null | head -n1; }
+  wps="$(wenv POWERSHELL)"; wram="$(wenv RAM_GB)"; wpf="$(wenv PAGEFILE_GB)"; wmem="$(wenv WSL_MEMORY_GB)"
+  if [ -n "$wps" ] && [ -e "$wps" ] && has timeout; then
+    sock="${WSL_INTEROP:-}"; [ -n "$sock" ] || sock="$(find /run/WSL -maxdepth 1 -name '*_interop' 2>/dev/null | sort | head -n1)"
+    # shellcheck disable=SC2016
+    read -r ckb fkb < <(WSL_INTEROP="$sock" timeout 8 "$wps" -NoProfile -NonInteractive -Command \
+      '$o = Get-CimInstance Win32_OperatingSystem; "$($o.TotalVirtualMemorySize) $($o.FreeVirtualMemory)"' </dev/null 2>/dev/null | tr -d '\r')
+    case "${ckb:-}${fkb:-}" in ''|*[!0-9]*) ;; *)
+      win_climit="$(awk -v k="$ckb" 'BEGIN{printf "%.1f", k/1048576}')"; win_cfree="$(awk -v k="$fkb" 'BEGIN{printf "%.1f", k/1048576}')" ;;
+    esac
+  fi
+  memtot_gb="$(awk '/^MemTotal:/{printf "%d", $2/1048576 + 0.5}' /proc/meminfo)"
+  items=""; npend=0
+  while IFS= read -r l; do
+    case "$l" in '{'*) ;; *) continue ;; esac
+    l="${l%,}"; id="$(printf '%s\n' "$l" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+    case "$id" in   # drop steps that are visibly done by now
+      wsl-restart) [ -n "$wmem" ] && [ "$memtot_gb" -ge $((wmem - 1)) ] && [ "$memtot_gb" -le $((wmem + 1)) ] && continue ;;
+      pagefile|reboot) [ -n "$win_climit" ] && [ -n "$wram" ] && awk -v c="$win_climit" -v r="$wram" -v p="$wpf" 'BEGIN{exit !(c + 1 >= r + p)}' && continue ;;
+    esac
+    items="${items:+$items,}$l"; npend=$((npend + 1))
+  done <"$CN_STATE/pending.json"
+  if [ -n "$win_cfree" ] && awk -v f="$win_cfree" -v c="$win_climit" 'BEGIN{exit !(f < 4 || f < 0.1 * c)}'; then
+    win_warn="$(js "low Windows commit headroom: ${win_cfree} GB free of ${win_climit} GB")"
+  fi
+  wj="$(tr -d '\n' <"$CN_STATE/windows.json")"; wj="${wj%\}}"
+  win_hw="${wj},\"commit_limit_gb\":$(num "$win_climit"),\"pending\":[${items}]}"
+  win_line=" | Windows commit ${win_cfree:-?}/${win_climit:-?}G free$([ "$npend" -gt 0 ] && echo ", $npend PENDING STEP(S)")"
+fi
+
+hardware="{\"cpu_model\":$(js "$cpu_model"),\"cpu_cores\":$(num "$cores"),\"cpu_threads\":$(num "$threads"),\"cpus_effective\":$(num "$eff"),\"mem_total_mb\":$(num "$mem_total"),\"mem_limit_mb\":$(num "$mem_limit"),\"gpus\":[${ghw}],\"os\":$(js "$os"),\"kernel\":$(js "$kernel"),\"arch\":$(js "$arch"),\"wsl\":$wsl,\"container\":$container,\"windows\":${win_hw}}"
+load="{\"loadavg\":[$(num "$l1"),$(num "$l5"),$(num "$l15")],\"mem_available_mb\":$(num "$mem_avail"),\"gpus\":[${gld}],\"disk\":[${disk_json}],\"tmux\":[${tmux_json}],\"uptime_s\":$(num "$up"),\"windows_commit_free_gb\":$(num "$win_cfree"),\"windows_warnings\":[${win_warn}]}"
 json="{\"hostname\":$(js "$host"),\"hardware\":${hardware},\"load\":${load}}"
 memtot="${mem_limit:-$mem_total}"
-line="${cpu_model:-cpu} ${cores}C/${threads}T eff ${eff}, $((memtot / 1024))G RAM, ${gline:-no GPU}$([ "$wsl" = true ] && echo ', WSL') | load ${l1}, mem $((mem_avail / 1024))G free${gload:+, $gload}, disk ${disk_line}, tmux ${tmux_line:--}"
+line="${cpu_model:-cpu} ${cores}C/${threads}T eff ${eff}, $((memtot / 1024))G RAM, ${gline:-no GPU}$([ "$wsl" = true ] && echo ', WSL') | load ${l1}, mem $((mem_avail / 1024))G free${gload:+, $gload}, disk ${disk_line}, tmux ${tmux_line:--}${win_line}"
 
 case "$mode" in
   --json) printf '%s\n' "$json" ;;

@@ -36,13 +36,16 @@ CPU 和 GPU 直接插在本机上一样。代码和 AI 编程 agent 都留在笔
 curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | sudo bash -s -- node
 ```
 
-在 WSL 终端里运行（需已装好 WSL2；Windows 一侧什么都不改），或在 Linux 机器上运行。它会安装 2222 端口的 sshd、
+在 WSL 终端里运行（需已装好 WSL2），或在 Linux 机器上运行。在 WSL 上它还会通过 WSL 互操作准备 Windows 一侧：合并
+`.wslconfig`、检查页面文件，并在 Windows 桌面上**弹出一次 UAC 提示**，注册开机任务、防火墙规则以及（需要时）更大的页面文件，
+见 [Windows 一侧](#windows-一侧wsl-节点)。它会安装 2222 端口的 sshd、
 Docker Engine（检测到 GPU 时加装 NVIDIA Container Toolkit）、Tailscale、`cn-status`/`cn-authorize`，并建好同步根目录
 `/Users`。Tailscale 登录时会打印一个网址，打开登录一次即可；无人值守安装可传入认证密钥：`... node --authkey tskey-auth-...`。
 不用 Tailscale（只走局域网）：`--no-tailscale`。
 
 其他参数：`--user 用户名`（默认是执行 sudo 的用户）、`--create-user`、`--port 2222`、`--sync-root 目录`（可重复）、
-`--ts-hostname 名字`、`--key-only`、`--authorize '公钥'`、`--no-docker`、`--gpu auto|yes|no`。普通 Linux 上用 GPU 要先装好
+`--ts-hostname 名字`、`--key-only`、`--authorize '公钥'`、`--no-docker`、`--gpu auto|yes|no`、`--no-windows`（不动 Windows）、
+`--no-elevate`（不弹 UAC，管理员步骤记为待办）、`--agent-sudo`（见 [sudo](#节点上的-sudo)）。普通 Linux 上用 GPU 要先装好
 NVIDIA 驱动；WSL 上用 **Windows 版** NVIDIA 驱动（WSL 里不要装 Linux 驱动）。
 
 最后会打印 join 行和笔记本上要执行的命令：
@@ -135,13 +138,28 @@ ssh -t cn-gpu1 tmux attach -t train
       "gpus": [{"index": 0, "vendor": "nvidia", "name": "<GPU name>", "mem_total_mb": 16000,
                 "driver": "<driver version>", "cuda": "<CUDA version>", "compute_cap": "<x.y>"}],
       "os": "Debian GNU/Linux 13 (trixie)", "kernel": "<kernel release>", "arch": "x86_64",
-      "wsl": true, "container": false
+      "wsl": true, "container": false,
+      "windows": {
+        "available": true, "os": "<Windows edition and build>", "ram_gb": 31.1,
+        "pagefile_total_gb": 55.5, "pagefile_system_managed": false,
+        "pagefiles": [{"name": "C:\\pagefile.sys", "allocated_gb": 23.5}, {"name": "D:\\pagefile.sys", "allocated_gb": 32.0}],
+        "commit_limit_gb_at_install": 86.0, "commit_limit_gb": 86.0,
+        "recommended": {"wsl_memory_gb": 24, "wsl_swap_gb": 6, "pagefile_gb": 55, "pagefile_drive": "D:", "commit_limit_gb": 86.1},
+        "wslconfig": {"path": "C:\\Users\\<you>\\.wslconfig", "memory": "24GB", "swap": "6GB", "vmIdleTimeout": "-1",
+                      "networkingMode": "mirrored", "autoMemoryReclaim": "gradual"},
+        "autostart": "registered", "tailscale_on_windows": false,
+        "admin_script": "C:\\Users\\<you>\\.cnode\\windows-admin.ps1",
+        "warnings": [],
+        "pending": [{"id": "wsl-restart", "title": "Restart WSL so .wslconfig (...) takes effect",
+                     "run": "wsl --shutdown   (in Windows, when nothing is running in WSL; ...)", "needs": "wsl-shutdown"}]
+      }
     },
     "load": {
       "loadavg": [0.5, 0.7, 0.9], "mem_available_mb": 18000,
       "gpus": [{"index": 0, "mem_used_mb": 1200, "mem_free_mb": 14800, "util_pct": 3}],
       "disk": [{"path": "/Users", "free_mb": 500000, "total_mb": 1000000}],
-      "tmux": ["train"], "uptime_s": 86400
+      "tmux": ["train"], "uptime_s": 86400,
+      "windows_commit_free_gb": 40.2, "windows_warnings": []
     },
     "sync": [{"session": "gpu1-0123456789", "path": "/Users/<you>/proj", "status": "Watching",
               "conflicts": 0, "connected": true, "paused": false}]
@@ -166,6 +184,8 @@ ssh -t cn-gpu1 tmux attach -t train
 | `load.gpus[]` | 每块 GPU（`index` 对应）：已用/剩余显存和利用率。 |
 | `load.disk[]` | 节点每个同步根目录的剩余空间。 |
 | `load.tmux` | 节点用户的 tmux 会话（用 `rx ... tmux new -d` 启动的任务）。 |
+| `hardware.windows` | 仅 WSL 节点（否则为 `null`）：Windows 宿主的内存、页面文件、提交限制（实时）、推荐值、`.wslconfig` 的值、`autostart`（`registered`/`pending`）、`warnings[]`，以及待办步骤 `pending[]`：每项有 `id`、`title`、`run`（要执行的准确命令）和 `needs`（`admin`、`reboot`、`wsl-shutdown`）。已明显完成的步骤（新内存上限已生效、提交限制已达到）会自动消失。 |
+| `load.windows_commit_free_gb`、`load.windows_warnings[]` | 实时的 Windows 提交内存余量，以及余量偏低时的警告。任务必须同时放得进它和 `mem_available_mb`。 |
 | `sync[]` | 本控制节点与该节点之间的 Mutagen 会话（状态、冲突数、是否连接、是否暂停）。 |
 
 表格形式（`rx nodes`）每个节点一行，内容相同。在节点上运行 `cn-status`、`cn-status --json` 输出该节点自己的部分。
@@ -201,7 +221,8 @@ ssh -t cn-gpu1 tmux attach -t train
 `--agent-rules 文件`；`--lang zh-CN` 用中文，`--no-agent-rules` 跳过。重跑时原位替换这一段，文件其余内容不动。
 规则告诉 agent：在本地编辑和搜索，构建/测试/GPU 任务一律走 `rx`；派发重负载前先 `rx nodes --json`，按 `hardware`
 （CPU 型号、实际可用 CPU、内存、GPU 型号/显存/CUDA）和实时 `load` 选节点；不要假定节点空闲；保留内存余量（节点可用内存或
-显存低于任务所需加余量时不要启动）；长任务在节点上用 tmux 起一个唯一名字的会话；从同步目录读结果。见
+显存（或 Windows 提交内存余量）低于任务所需加余量时不要启动）；节点报告 Windows 待办步骤时先把准确命令告诉用户；不在节点上用 sudo
+（见 [sudo](#节点上的-sudo)）；长任务在节点上用 tmux 起一个唯一名字的会话；从同步目录读结果。见
 [templates/agent-rules.zh-CN.md](templates/agent-rules.zh-CN.md)。想在 Claude Code 里免确认调用 `rx`，可以允许
 `Bash(rx:*)` 和 `Bash(wsync:*)`；这样 agent 不经确认就能在节点上执行任意命令，它在节点上写的文件也会同步回来。
 
@@ -219,6 +240,8 @@ ssh -t cn-gpu1 tmux attach -t train
 | 让 SSH 会话找到 `nvidia-smi`（WSL 只给本地终端加 `/usr/lib/wsl/lib`） | `/usr/local/bin/nvidia-smi`、`/etc/profile.d/wsl-lib.sh`（仅 WSL） |
 | 同步根目录 `/Users`，归节点用户所有 | 对应 macOS 路径。Linux 控制节点请加 `--sync-root /home/<你>`。 |
 | `cn-status`、`cn-authorize` | `/usr/local/bin`，设置在 `/etc/compute-node.conf` |
+| Windows 宿主（仅 WSL） | `.wslconfig` 合并、开机任务、Hyper-V 防火墙规则、页面文件：见 [Windows 一侧](#windows-一侧wsl-节点)。状态在 `/etc/cnode/{windows.json,windows.env,pending.json}`。 |
+| `/etc/sudoers.d/90-cnode-<用户>` | 仅在 `--agent-sudo` 时。 |
 | WSL 上的 systemd | `/etc/wsl.conf [boot] systemd=true` 和 `[user] default=`，发行版下次启动时生效；在那之前各服务直接启动，现在不需要重启任何东西。 |
 
 ### 控制节点（`scripts/control-setup.sh`、`bin/cnode`）
@@ -232,19 +255,65 @@ ssh -t cn-gpu1 tmux attach -t train
 | Mutagen 守护进程、每个节点一个 docker context | 默认 `docker context use <第一个节点>`，`--keep-docker-context` 可跳过。 |
 | `~/.claude/CLAUDE.md`（及 `~/.codex/AGENTS.md`）中的 agent 规则块 | 在标记之间，原位替换；`--no-agent-rules` 跳过。 |
 
-## 仍需 Windows 一侧处理的事（WSL 节点）
+## Windows 一侧（WSL 节点）
 
-本工具不改 Windows 一侧的任何东西。以下几点无法在发行版内部完成：
+安装在 WSL 里运行，通过 WSL 互操作访问 Windows（用完整路径 `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`，
+因为非交互 shell 里 `powershell.exe` 常常不在 PATH 中）。它绝不执行 `wsl --shutdown`，也绝不重启；这些留给你在没有任务运行时去做。
 
-- **WSL2 本身**要已安装，并有 Debian 或 Ubuntu 发行版（`wsl --install -d Debian`）。
-- **发行版必须在运行。** 最后一个 Windows 侧进程（终端）退出几秒后 WSL 会停掉发行版，闲置时还会停掉 VM；systemd 服务不能让它保持运行，
-  Windows 重启后也不会自动启动。请保持一个 WSL 终端开着，或自己在 Windows 上设置：`%USERPROFILE%\.wslconfig` 的 `[wsl2]` 下加
-  `vmIdleTimeout=-1`，再建一个登录/开机任务运行 `wsl -d <发行版> --exec sleep infinity`。
-- **睡眠**：睡着的电脑当不了算力节点（Windows 电源设置）。
-- **GPU 驱动**：WSL 里的 CUDA 由 Windows 版 NVIDIA 驱动提供。
-- **不用 Tailscale 时的局域网访问**：WSL 默认的 NAT 模式下其他机器连不到发行版，需要 Windows 一侧做端口转发，或使用
-  `networkingMode=mirrored`（再加一条 Hyper-V 防火墙规则）。在发行版里跑 Tailscale 可以完全绕开这些。
-- 如果 Windows 本身也运行 Tailscale，**并且** WSL 用了 mirrored 网络，两者可能冲突；这种情况用 `--no-tailscale`，host 填 Windows 的 Tailscale 名字。
+| 步骤 | 方式 | 需要管理员？ |
+|---|---|---|
+| 读取内存、页面文件、提交限制、磁盘、开机任务、Windows 上的 Tailscale | CIM 查询 | 否 |
+| 合并 `%USERPROFILE%\.wslconfig`（先备份为 `.wslconfig.bak-<时间>`；其他键保留）：`[wsl2] memory=<M>GB`、`swap=<ceil(M/4)>GB`、`vmIdleTimeout=-1`（闲置时不停 VM）、`networkingMode=mirrored`（WSL 共用 Windows 的网卡）、`[experimental] autoMemoryReclaim=gradual`（把空闲缓存还给 Windows）。你自己设过的 `memory=` 会保留（高于 M 时给出警告）。`wsl --shutdown` 后生效。 | 改文件 | 否 |
+| **开机自启**：计划任务 `WSL Compute Node`，触发器“启动时”，以你的账户运行 `wsl.exe -d <发行版> --exec /bin/sleep infinity`，无论是否有人登录（会问一次 Windows 密码，不是 PIN）；发行版里的 systemd 再拉起 sshd、Docker 和 Tailscale | `Register-ScheduledTask` | 是 |
+| Hyper-V 防火墙规则 `WSL-SSH-2222`（mirrored 网络下进入 WSL 的流量） | `New-NetFirewallHyperVRule` | 是 |
+| 页面文件太小时设为固定大小（见下文）；需要重启 | `Win32_PageFileSetting` | 是 |
+
+管理员步骤写入 `%USERPROFILE%\.cnode\windows-admin.ps1`；有人在终端前时，用 `Start-Process -Verb RunAs` 运行（Windows 桌面上
+**一次 UAC 提示**）。如果提示被拒绝、无法弹出（没有终端、`--no-elevate`）或某步失败，该步骤会作为**待办**记录在
+`/etc/cnode/pending.json`，并附上准确命令：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\<你>\.cnode\windows-admin.ps1"   # 管理员 PowerShell
+```
+
+待办步骤（以及改了 `.wslconfig` 后的 `wsl --shutdown`、改了页面文件后的重启）会在安装结束时打印，并由 `rx nodes --json` 在
+`hardware.windows.pending` 中报告，agent 在那里启动重负载前会先告诉用户。重跑安装会刷新它们。
+
+如果 Windows 本身已经运行 Tailscale，安装不会在 WSL 里再加一个 tailnet 节点：mirrored 网络下用 Windows 机器的 Tailscale 名字访问节点。
+
+仍需你在 Windows 上做的：安装 WSL2 和 Debian/Ubuntu 发行版（`wsl --install -d Debian`）、Windows 版 NVIDIA 驱动、电源设置（睡着的电脑
+当不了算力节点），以及在待办列表要求时执行 `wsl --shutdown` 或重启。
+
+## 内存与页面文件
+
+Windows 的**提交限制**（commit limit）= 物理内存 + 页面文件。所有提交的内存都算在里面：Windows 及其程序、WSL VM（最多到 `memory=`
+上限）、GPU 共享内存。总量碰到上限时 Windows 无法再分配内存，即使“可用内存”看起来还够，机器也可能崩溃或杀掉 WSL VM。所以安装按内存
+大小算出三个值：
+
+| | 公式 | 31.1 GB 内存（实例） |
+|---|---|---|
+| WSL 内存上限 `M` | `floor(RAM - max(6, 0.2 x RAM))` | 31.1 - 6.2 = 24.9 -> **24 GB** |
+| WSL swap | `ceil(M / 4)` | **6 GB** |
+| 页面文件总量 `P` | `round(RAM) + M`，固定大小（初始 = 最大） | 31 + 24 = **55 GB** |
+| 提交限制 | RAM + P | 31.1 + 55 = **约 86 GB** |
+
+这与一台满负载也稳定运行的机器一致：内存 31.1 GB，WSL 内存 24 GB，页面文件 C: 系统管理（已分配 23.5 GB）+ D: 固定 32 GB = 55.5 GB，
+提交限制 86 GB。
+
+规则：页面文件放在剩余空间最大的固定磁盘上，放完后该盘要还剩 20 GB；空间不够时上限为“剩余 - 20 GB”，并大声警告（腾出空间或调低
+`memory=`）。如果原来是 Windows 自动管理页面文件，会保留 C: 上的系统管理页面文件，再在选定的盘上加固定大小的页面文件。已有页面文件
+总量已达到 P 时不做改动（系统管理的按已分配大小计算）。当前状态无需管理员权限即可读取（`Win32_ComputerSystem.AutomaticManagedPagefile`、
+`Win32_PageFileSetting`、`Win32_PageFileUsage`、`Win32_OperatingSystem.TotalVirtualMemorySize`/`FreeVirtualMemory`）。
+
+## 节点上的 sudo
+
+agent 不应使用 `sudo`：它会要求输入 agent 无法输入的密码。规则块要求 agent 装到用户空间（`uv`、`pip --user`、`rustup`、`npm --prefix`，
+或 `apt download <包>` + `dpkg-deb -x <包>.deb ~/.local/opt/<包>`）；确实需要 root 时，请你在自己的终端里运行 `rx -n <节点> sudo ...`。
+`rx` 只在 stdin 和 stdout 都是终端时才分配 TTY，所以你运行时 sudo 正常提示，agent 运行时会立刻失败而不是卡住。
+
+节点安装加 `--agent-sudo` 会写入 `/etc/sudoers.d/90-cnode-<用户>`，给节点用户 `NOPASSWD:ALL`，agent 就能无人值守地用 `sudo`。
+**默认关闭**：这等于让所有能以该用户登录节点的人（每个已授权的控制节点、上面的每个 agent）拿到节点的完整 root；在 WSL 上，发行版里的
+root 还能通过 `/mnt/c` 访问你的 Windows 文件。不带这个参数重跑安装会删除该文件。
 
 ## 安全模型
 
@@ -267,8 +336,8 @@ Linux 机器内部运行它，所以不需要改路由器或 Windows。笔记本
 
 ## 限制
 
-- **WSL 内存**：WSL 最多只能用 Windows 内存的一部分（默认一半），并与 Windows 争用；`rx nodes` 显示实际可用量。调整上限属于 Windows
-  设置（`.wslconfig` 的 `memory=`）。
+- **WSL 内存**：VM 上限为 `M`（见 [内存与页面文件](#内存与页面文件)），并与 Windows 争用内存和提交内存；`rx nodes` 同时显示
+  `mem_available_mb` 和 `windows_commit_free_gb`。
 - **容器当算力节点**：Docker 或 RunPod 容器可以提供 `rx`/`wsync`（没有 systemd 也会直接启动 sshd 和 tailscaled，Tailscale 用
   userspace 模式），但跑不了 Docker Engine：非特权容器无法创建它需要的命名空间和 cgroup，也无法承载 rootless Docker 所需的用户命名空间。
   这种情况用 `--no-docker`。
@@ -282,13 +351,17 @@ Linux 机器内部运行它，所以不需要改路由器或 Windows。笔记本
 
 | 现象 | 原因 / 解决 |
 |---|---|
-| 过一段时间节点就连不上了（WSL） | 发行版或 WSL VM 停了，见“仍需 Windows 一侧处理的事”。打开一个 WSL 终端即可重新启动。 |
+| 过一段时间节点就连不上了（WSL） | 发行版或 WSL VM 停了：开机任务注册了吗（`hardware.windows.autostart`）？改 `.wslconfig` 后做过 `wsl --shutdown` 吗（`vmIdleTimeout=-1`）？用 `Start-ScheduledTask "WSL Compute Node"` 或打开 WSL 终端重新启动。 |
+| 重负载时整台电脑崩溃或 WSL 退出 | 提交内存耗尽：查看 `hardware.windows.pending`/`warnings` 和 `load.windows_commit_free_gb`；执行页面文件步骤并重启（见 [内存与页面文件](#内存与页面文件)）。 |
+| UAC 提示没出现或被拒绝 | 这些步骤成了待办：在管理员 PowerShell 里运行打印出的 `powershell ... windows-admin.ps1` 命令，或从 WSL 终端重跑节点安装。 |
+| 改过 Windows 密码 | 开机任务里存着旧密码：删除该任务后再以管理员身份运行 `windows-admin.ps1`，或重跑安装。 |
 | `tailscale up` 一直等待 | 打开打印的网址登录，或用 `--authkey` 重跑。用 `tailscale status` 检查。 |
 | 通过 SSH 执行时 `nvidia-smi: command not found` | 重跑节点安装（会把 `nvidia-smi` 链接到 `/usr/local/bin`）。 |
 | `rx` 或同步卡住、要求输入密码短语 | 密钥的密码短语不在 agent/钥匙串里：`ssh-add --apple-use-keychain ~/.ssh/id_ed25519`（macOS）。 |
 | `cnode add` 在密码登录这一步失败 | 密码错误、节点用户没有密码（在节点上 `sudo passwd <用户>`），或节点用了 `--key-only`：改为在节点上执行 `cnode key` 打印的那一行。 |
 | 连不上 2222 端口 | 节点在运行吗（两边 `tailscale status`）？在同一个 tailnet 吗？WSL 上不用 Tailscale 时见上文“局域网访问”。 |
 | `host key ... CHANGED` / `Host key verification failed` | 节点重装过，或连到了别的机器。在节点上核对（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`）；若是预期的：`cnode remove <节点>` 后重新添加。 |
+| `sudo: a terminal is required` / agent 卡在 sudo | 对 agent 来说是预期行为：你自己运行 `rx -n <节点> sudo ...`，或用 `--agent-sudo` 安装（见 [sudo](#节点上的-sudo)）。 |
 | `rx: ... does not exist on <节点>` | 这个目录没有同步到该节点：在项目根运行 `wsync -n <节点>`。 |
 | `tailscale ping` 显示 `via DERP` | 走了中继：是否在同一局域网？路由器是否拦了 UDP 41641？ |
 | 同步冲突 | 以控制节点为准；用 `wsync -l` 或 `mutagen sync monitor` 查看。 |
@@ -311,18 +384,30 @@ sudo rm /etc/ssh/sshd_config.d/10-compute-node.conf /etc/sysctl.d/90-compute-nod
         /usr/local/bin/cn-status /usr/local/bin/cn-authorize /etc/profile.d/wsl-lib.sh /usr/local/bin/nvidia-smi
 sudo systemctl restart ssh   # 或者停用：sudo systemctl disable --now ssh
 sudo tailscale logout; sudo apt-get purge tailscale
+sudo rm -rf /etc/cnode /etc/sudoers.d/90-cnode-*
 sudo apt-get purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin nvidia-container-toolkit
 # /Users 下是同步过来的项目副本，确认不再需要后再手动删除
+```
+
+Windows（管理员 PowerShell；只撤销安装添加的内容）：
+```powershell
+Unregister-ScheduledTask -TaskName 'WSL Compute Node' -Confirm:$false
+Remove-NetFirewallHyperVRule -Name WSL-SSH-2222
+# 页面文件改回自动管理（重启后生效）：
+$cs = Get-CimInstance Win32_ComputerSystem; Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $true }
+# .wslconfig：需要旧版本时恢复 %USERPROFILE%\.wslconfig.bak-<时间>；删除 %USERPROFILE%\.cnode
 ```
 
 安装脚本从 `https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main` 下载；用 fork 或某个 tag 时设置 `CN_RAW_URL`。
 
 ## 测试
 
-`tests/run.sh [lint|control|node|multinode|all]` 运行全部测试，不触碰真实机器（详见英文 README 的 Tests 一节）：控制节点安装（桩替身）、
-Debian/Ubuntu 容器里的节点安装（密码与密钥登录、`--key-only`、真实 Tailscale 软件包 + 桩替身的守护进程与登录、`--no-tailscale`）、
-以及两个节点容器 + 两个控制用户的端到端测试（`cnode add` 用密码自动装密钥、首次信任与指纹固定、手动 `cn-authorize`）。
-Docker 测试使用当前 docker context，引擎可用内存低于 `MIN_AVAILABLE_MB`（6000）时自动跳过；不使用 GPU。
+`tests/run.sh [lint|unit|ps|control|node|multinode|all]` 运行全部测试，不触碰真实机器（详见英文 README 的 Tests 一节）：
+内存/swap/页面文件公式与 `.wslconfig` 合并的单元测试、生成的 PowerShell 的纯解析检查（从不执行）、控制节点安装（桩替身）、
+Debian/Ubuntu 容器里的节点安装（密码与密钥登录、`--key-only`、Tailscale、模拟互操作下的 Windows 一侧：待办步骤、UAC 接受/拒绝、模拟重启、
+`pending.json` -> `cn-status --json`、`--agent-sudo`），以及两个节点容器 + 两个控制用户的端到端测试。
+Docker 测试使用当前 docker context，引擎可用内存低于 `MIN_AVAILABLE_MB`（7000）时自动跳过，容器有内存上限；不使用 GPU，也不触碰真实的
+Windows 宿主（`.wslconfig`、页面文件、计划任务）。
 
 ## 许可证
 

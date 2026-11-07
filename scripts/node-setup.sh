@@ -15,6 +15,9 @@
 #   --key-only           refuse SSH passwords (default: passwords and keys both work)
 #   --authorize 'KEY'    authorize a control node's public key for --user; repeatable
 #   --no-docker          skip Docker Engine (and the NVIDIA Container Toolkit)
+#   --no-windows         WSL: leave Windows alone (no .wslconfig, boot task, firewall, pagefile)
+#   --no-elevate         WSL: never show a UAC prompt; record admin steps as pending
+#   --agent-sudo         let the node user run sudo without a password (NOPASSWD; off by default)
 #   --gpu auto|yes|no    install the NVIDIA Container Toolkit (auto: if an NVIDIA GPU is visible)
 #   --wsl auto|yes|no    treat this as a WSL distro (auto-detected)
 #   --no-self-test       skip the GPU container self-test
@@ -25,7 +28,7 @@ set -euo pipefail
 
 SSH_PORT=2222; TARGET_USER="${SUDO_USER:-}"; CREATE_USER=0; SYNC_ROOTS=(); KEYS=(); KEY_ONLY=0
 TAILSCALE=1; TS_KEY="${TS_AUTHKEY:-}"; TS_HOST=""
-DOCKER=1; GPU=auto; WSL=auto; SELF_TEST=1; SRC=""
+DOCKER=1; GPU=auto; WSL=auto; SELF_TEST=1; SRC=""; WINDOWS=1; ELEVATE=1; AGENT_SUDO=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --user) TARGET_USER="${2:?}"; shift 2 ;;
@@ -38,6 +41,9 @@ while [ $# -gt 0 ]; do
     --authkey) TS_KEY="${2:?}"; shift 2 ;;
     --ts-hostname) TS_HOST="${2:?}"; shift 2 ;;
     --no-docker) DOCKER=0; shift ;;
+    --no-windows) WINDOWS=0; shift ;;
+    --no-elevate) ELEVATE=0; shift ;;
+    --agent-sudo) AGENT_SUDO=1; shift ;;
     --gpu) GPU="${2:?}"; shift 2 ;;
     --wsl) WSL="${2:?}"; shift 2 ;;
     --no-self-test) SELF_TEST=0; shift ;;
@@ -139,6 +145,29 @@ if [ "$WSL" = yes ]; then
   has_systemd || note "systemd takes over at the distro's next start; services are started directly for now"
 fi
 
+WINDOWS_TAILSCALE=0; WINDOWS_TS_NAME=""
+if [ "$WSL" = yes ] && [ "$WINDOWS" = 1 ]; then
+  say "Windows side (via WSL interop): .wslconfig, boot task, firewall rule, pagefile"
+  w_args=(--port "$SSH_PORT"); [ "$ELEVATE" = 0 ] && w_args+=(--no-elevate)
+  bash "$SRC/scripts/windows-setup.sh" "${w_args[@]}" || warn "Windows-side setup failed; see the messages above"
+  if [ -f /etc/cnode/windows.env ]; then
+    WINDOWS_TAILSCALE="$(sed -n 's/^WINDOWS_TAILSCALE=//p' /etc/cnode/windows.env)"
+    WINDOWS_TS_NAME="$(sed -n 's/^WINDOWS_TS_NAME=//p' /etc/cnode/windows.env)"
+  fi
+fi
+
+say "sudo for the node user"
+if [ "$AGENT_SUDO" = 1 ]; then
+  printf '# compute-node --agent-sudo: %s may run sudo without a password\n%s ALL=(ALL) NOPASSWD:ALL\n' "$TARGET_USER" "$TARGET_USER" \
+    | write_if_changed "/etc/sudoers.d/90-cnode-$TARGET_USER" && note "NOPASSWD sudo enabled for $TARGET_USER" || note "unchanged"
+  chmod 0440 "/etc/sudoers.d/90-cnode-$TARGET_USER"
+  visudo -cf "/etc/sudoers.d/90-cnode-$TARGET_USER" >/dev/null || { rm -f "/etc/sudoers.d/90-cnode-$TARGET_USER"; die "sudoers check failed"; }
+elif [ -f "/etc/sudoers.d/90-cnode-$TARGET_USER" ]; then
+  rm -f "/etc/sudoers.d/90-cnode-$TARGET_USER"; note "removed NOPASSWD sudo (re-run with --agent-sudo to keep it)"
+else
+  note "sudo asks for $TARGET_USER's password (agents cannot use it; --agent-sudo changes that)"
+fi
+
 say "sshd on port $SSH_PORT ($([ "$KEY_ONLY" = 1 ] && echo 'keys only' || echo 'password or key'))"
 install -d -m 0755 /etc/ssh/sshd_config.d
 if ! grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config; then
@@ -236,6 +265,12 @@ if [ "$DOCKER" = 1 ]; then
   fi
 fi
 
+if [ "$TAILSCALE" = 1 ] && [ "$WINDOWS_TAILSCALE" = 1 ]; then
+  say "Tailscale"
+  note "Windows already runs Tailscale: not adding a second tailnet node inside WSL."
+  note "With mirrored networking (after wsl --shutdown) this node is reached at the Windows machine's name${WINDOWS_TS_NAME:+: $WINDOWS_TS_NAME}."
+  TAILSCALE=0
+fi
 if [ "$TAILSCALE" = 1 ]; then
   say "Tailscale (reach this node from anywhere, no router or Windows changes)"
   if dpkg-query -W -f='${Status}' tailscale 2>/dev/null | grep -q 'install ok installed' || [ -x /usr/sbin/tailscaled ]; then
@@ -312,7 +347,7 @@ if [ "$TAILSCALE" = 1 ] && command -v tailscale >/dev/null 2>&1; then
   [ -n "$TSNAME" ] || TSNAME="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
 fi
 LAN="$(hostname -I 2>/dev/null | awk '{print $1}')"
-HOST_HINT="${TSNAME:-${LAN:-<host>}}"
+HOST_HINT="${TSNAME:-${WINDOWS_TS_NAME:-${LAN:-<host>}}}"
 URL="${CN_RAW_URL:-https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main}"
 echo
 echo "Compute node ready."
@@ -324,4 +359,9 @@ echo "  curl -fsSL ${URL}/install.sh | bash -s -- control --name <name> --host $
 echo "  or, if cnode is already installed:  cnode add <name> --host ${HOST_HINT} --user ${TARGET_USER} --port ${SSH_PORT}"
 echo "  optional: add --fingerprint ${FP} to pin the host key instead of trusting it on first use"
 [ "$KEY_ONLY" = 1 ] && echo "  (--key-only: authorize each control node here with  cn-authorize '<line printed by cnode key>')"
+if [ -s /etc/cnode/pending.json ] && grep -q '"id"' /etc/cnode/pending.json; then
+  echo
+  echo "PENDING WINDOWS STEPS (also shown by rx nodes --json; this installer never runs wsl --shutdown or reboots):"
+  sed -n 's/.*"title":"\([^"]*\)","run":"\(\([^"\\]\|\\.\)*\)".*/  - \1\n      run: \2/p' /etc/cnode/pending.json | sed 's/\\\\/\\/g; s/\\"/"/g'
+fi
 exit 0

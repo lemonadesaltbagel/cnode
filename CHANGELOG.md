@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0 - 2026-11-07
+
+Windows host care for WSL nodes, still started from inside WSL.
+
+- WSL nodes prepare Windows through interop (full path to Windows PowerShell): merge
+  `.wslconfig` (backup first, other keys and an explicit `memory=` kept) with `memory=M`,
+  `swap=ceil(M/4)`, `vmIdleTimeout=-1`, `networkingMode=mirrored`, `autoMemoryReclaim=gradual`;
+  never run `wsl --shutdown` or reboot.
+- Autostart as in the original setup: scheduled task `WSL Compute Node` at startup without logon,
+  plus the Hyper-V firewall rule, run with one UAC prompt (`Start-Process -Verb RunAs`).
+- Pagefile sizing against commit-limit crashes: M = floor(RAM - max(6, 0.2 RAM)), pagefile
+  P = round(RAM) + M on the drive with the most free space (capped at free - 20 GB, with a loud
+  warning), set in the same elevated step; reboot left to the user.
+- Steps that could not be done are recorded in `/etc/cnode/pending.json` with the exact command,
+  printed at the end of the install and reported by `rx nodes --json` (`hardware.windows`,
+  `load.windows_commit_free_gb`, `load.windows_warnings`).
+- No second tailnet node inside WSL when Windows already runs Tailscale.
+- `--agent-sudo` (NOPASSWD for the node user, off by default); the agent rules now forbid sudo on
+  nodes, cover pending Windows steps and the Windows commit headroom.
+- New options: `--no-windows`, `--no-elevate`, `--agent-sudo`.
+- Tests: formula and `.wslconfig` merge unit tests, parse-only checks of the generated
+  PowerShell, the Windows side with mocked interop; Docker tests need 7000 MB free and run in
+  memory-limited containers.
+
 ## 0.2.0 - 2026-11-07
 
 Simpler deployment: one command inside WSL (or on a Linux box), one on the laptop.

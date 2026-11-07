@@ -16,7 +16,7 @@ trap cleanup EXIT
 cleanup
 docker network create "$NET" >/dev/null || exit 1
 for c in "$N1" "$N2" "$CTL"; do
-  docker run -d --name "$c" --hostname "${c#cntest-mn-}" --network "$NET" "$IMG" sleep infinity >/dev/null || exit 1
+  docker run -d --memory 512m --name "$c" --hostname "${c#cntest-mn-}" --network "$NET" "$IMG" sleep infinity >/dev/null || exit 1
   repo_tar . | docker exec -i "$c" sh -c 'mkdir -p /src && tar -x -C /src'
 done
 

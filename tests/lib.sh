@@ -12,9 +12,9 @@ finish() { [ "$FAILS" -eq 0 ] && { echo "  all checks passed"; exit 0; }; echo "
 
 # Docker engine memory gate: skip (exit 77) unless more than MIN_AVAILABLE_MB is available.
 mem_gate() {
-  local min="${MIN_AVAILABLE_MB:-6000}" avail
+  local min="${MIN_AVAILABLE_MB:-7000}" avail
   command -v docker >/dev/null 2>&1 || { echo "  no docker CLI: skipping"; exit 77; }
-  avail="$(docker run --rm debian:13 awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)"
+  avail="$(docker run --rm --memory 64m debian:13 awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)"
   [ -n "$avail" ] || { echo "  docker engine not usable: skipping"; exit 77; }
   if [ "$avail" -le "$min" ]; then echo "  only ${avail} MB available on the docker host (need > ${min}): skipping"; exit 77; fi
   echo "  docker host: ${avail} MB available"
