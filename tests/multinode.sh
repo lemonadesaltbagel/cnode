@@ -34,6 +34,12 @@ for c in "$N1" "$N2"; do
   fp="$(echo "$out" | sed -n 's/.*join: .*fingerprint=\(SHA256:[^ ]*\).*/\1/p' | head -n1)"
   check "$c: join line has a fingerprint" test -n "$fp"
   case "$c" in "$N1") FP_n1="$fp" ;; *) FP_n2="$fp" ;; esac
+  # OpenSSH >= 9.8 blocks a source address for a while after failed or unauthenticated connections
+  # (PerSourcePenalties). Here one container plays every control node, and the deliberate failures
+  # below (wrong fingerprints, key probes before a key exists) all come from its single address, so
+  # the nodes would start resetting its connections. Test nodes only; the node setup keeps the default.
+  docker exec "$c" sh -c 'sshd -T 2>/dev/null | grep -q "^persourcepenalties " || exit 0
+    echo "PerSourcePenalties no" >/etc/ssh/sshd_config.d/00-test-no-penalties.conf && sshd -t && kill -HUP "$(cat /run/sshd.pid)"'
 done
 
 echo "-- control node users (alice, bob)"
@@ -51,7 +57,10 @@ check "alice: key installed on n1 through the one password login" sh -c 'echo "$
 check "alice: AGENTS.md rules mention rx nodes --json" as alice 'grep -q "rx nodes --json" AGENTS.md'
 KA="$(as alice 'cnode key')"
 check "alice: key login to n1 works without a password now" as alice 'ssh -o BatchMode=yes cn-n1 true'
-check "alice: cnode add n2 (no fingerprint: trust on first use, password once)" sh -c "PW=node-pass; docker exec -u alice -e HOME=/home/alice -e CN_PASSWORD=\$PW $CTL /home/alice/.local/bin/cnode add n2 --host $N2 --user dev | grep -q 'first use: $FP_n2'"
+# capture the whole output first: with `| grep -q` the docker exec client exits at the first match
+# while cnode keeps installing the key inside the container, racing the next check
+out="$(docker exec -u alice -e HOME=/home/alice -e CN_PASSWORD=node-pass "$CTL" /home/alice/.local/bin/cnode add n2 --host "$N2" --user dev 2>&1)"; rc=$?
+check "alice: cnode add n2 (no fingerprint: trust on first use, password once)" sh -c '[ "$2" = 0 ] && printf "%s\n" "$1" | grep -q "first use: $3"' _ "$out" "$rc" "$FP_n2"
 check "alice: key login to n2" as alice 'ssh -o BatchMode=yes cn-n2 true'
 PW=node-pass as alice "cnode add n1 --host $N1 --user dev" >/dev/null 2>&1
 check "re-adding does not duplicate the key on the node" sh -c "[ \"\$(docker exec $N1 grep -c alice@ /home/dev/.ssh/authorized_keys)\" = 1 ]"

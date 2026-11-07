@@ -12,6 +12,11 @@
   original setup did) when the active power plan would sleep; otherwise a `power` pending step.
   `windows.json` reports `never_sleep_on_ac`.
 - `cn-authorize`: its header no longer claims sshd is key-only.
+- Tests: the multinode run passes on Debian 13. Its nodes turn off OpenSSH 9.8+'s
+  `PerSourcePenalties`, which blocked the one control container after the test's deliberate
+  failed logins, and `cnode add n2` is no longer cut short by `| grep -q` (the key install kept
+  running inside the container and raced the next check). Troubleshooting entry for the
+  penalty's `Connection reset by peer`.
 
 ## 0.3.0 - 2026-11-07
 
