@@ -4,9 +4,9 @@
 #
 #   --host H --user U [--port 2222]   register a compute node right away (optional; later: cnode add)
 #   --name NAME          its name (default: wsl - also keeps the alias of the original single-node setup)
-#   --fingerprint FP     expected SSH host key (SHA256:..., from the node's join line); verified before use
-#   --accept-new         trust the node's host key on first sight instead (TOFU)
-#   --copy-id            authorize this machine's key with ssh-copy-id (needs password login on the node)
+#                        The first login asks for U's password once (or reads env CN_PASSWORD) and
+#                        installs this machine's SSH key, so later rx/wsync calls never prompt.
+#   --fingerprint FP     pin the node's host key (SHA256:... from its join line); default: trust on first use
 #   The agent rules block (how coding agents should use rx/wsync/rx nodes) is written by default to
 #   ~/.claude/CLAUDE.md, and to ~/.codex/AGENTS.md if ~/.codex exists, between BEGIN/END markers.
 #   --agent-rules FILE   also write it to FILE (repeatable), e.g. a project's AGENTS.md
@@ -18,7 +18,7 @@
 # Safe to re-run: files are only rewritten when their content changes.
 set -euo pipefail
 
-HOST=""; USER_="" ; PORT=2222; NAME=wsl; FP=""; ACCEPT=0; COPYID=0; RULES=(); NORULES=0; LANG_=en
+HOST=""; USER_="" ; PORT=2222; NAME=wsl; FP=""; RULES=(); NORULES=0; LANG_=en
 INSTALL=1; DOCKER=1; DOCKER_DEFAULT=1; SRC=""
 MUTAGEN_VERSION="${MUTAGEN_VERSION:-0.18.1}"
 while [ $# -gt 0 ]; do
@@ -28,8 +28,7 @@ while [ $# -gt 0 ]; do
     --port) PORT="${2:?}"; shift 2 ;;
     --name) NAME="${2:?}"; shift 2 ;;
     --fingerprint) FP="${2:?}"; shift 2 ;;
-    --accept-new) ACCEPT=1; shift ;;
-    --copy-id) COPYID=1; shift ;;
+    --accept-new|--copy-id) shift ;;   # (now the default behaviour)
     --agent-rules) RULES+=("${2:?}"); shift 2 ;;
     --no-agent-rules) NORULES=1; shift ;;
     --lang) LANG_="${2:?}"; shift 2 ;;
@@ -135,8 +134,6 @@ if [ -n "$HOST" ]; then
   say "Compute node '$NAME' -> $USER_@$HOST:$PORT"
   args=(add "$NAME" --host "$HOST" --user "$USER_" --port "$PORT" --default)
   [ -n "$FP" ] && args+=(--fingerprint "$FP")
-  [ "$ACCEPT" = 1 ] && args+=(--accept-new)
-  [ "$COPYID" = 1 ] && args+=(--copy-id)
   [ "$DOCKER" = 1 ] && [ "$DOCKER_DEFAULT" = 1 ] && args+=(--docker-default)
   cnode "${args[@]}" || ADD_RC=$?
   [ "$ADD_RC" = 0 ] && cnode status "$NAME" || true
@@ -160,8 +157,8 @@ fi
 
 echo
 echo "Control node ready. Next:"
-[ -z "$HOST" ] && echo "  cnode add <name> --host <host> --user <user> --port 2222 --fingerprint SHA256:...   (join line from the node)"
-[ "$ADD_RC" = 3 ] && echo "  authorize this machine on '$NAME' (line below), then check:  cnode status $NAME"
-echo "  To authorize this machine on a compute node, run there:  $(cnode key)"
+[ -z "$HOST" ] && echo "  cnode add <name> --host <host> --user <user> --port 2222   (values from the node's join line)"
+[ "$ADD_RC" = 3 ] && echo "  the key is not on '$NAME' yet: on the node run  $(cnode key)  then check: cnode status $NAME"
+echo "  More nodes:  cnode add <name> --host <host> --user <user>   (asks for the password once)"
 echo "  Then, in a project:  wsync && rx nproc && rx nodes"
 exit 0

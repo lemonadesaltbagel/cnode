@@ -1,6 +1,6 @@
 # compute-node
 
-在笔记本上使用一台 GPU 机器（通过 WSL2 的 Windows 电脑，或任意 Debian/Ubuntu 机器），就像它的
+在笔记本上使用一台 GPU 机器（Windows 电脑里的 WSL2 发行版，或任意 Debian/Ubuntu 机器），就像它的
 CPU 和 GPU 直接插在本机上一样。代码和 AI 编程 agent 都留在笔记本上；重负载命令在算力节点的
 **同一绝对路径**下执行，产出再同步回来。
 
@@ -9,7 +9,7 @@ CPU 和 GPU 直接插在本机上一样。代码和 AI 编程 agent 都留在笔
 ```
  控制节点（笔记本：agent + 代码）                      算力节点（CPU / GPU / Docker）
  ┌──────────────────────────────────┐                ┌──────────────────────────────────┐
- │ 编辑、git、grep：在本地，最快    │ Mutagen 双向   │ n1: Windows 11 -> WSL2 (Debian)  │
+ │ 编辑、git、grep：在本地，最快    │ Mutagen 双向   │ n1: Windows 电脑里的 WSL2 发行版 │
  │ ~/proj  ── wsync -n n1 ──────────┼───────────────>│ /Users/you/proj（同名路径）      │
  │ rx -n n1 <命令> ─────────────────┼── ssh :2222 ──>│ 在那里执行，可用 CUDA            │
  │ docker --context n1 ... ─────────┼── ssh ────────>│ Docker Engine + NVIDIA 运行时    │
@@ -28,69 +28,48 @@ CPU 和 GPU 直接插在本机上一样。代码和 AI 编程 agent 都留在笔
 
 ## 快速开始
 
-顺序不太重要，通常是：先装算力节点，复制它打印的 **join 行**；用它安装控制节点；再把控制节点打印的
-**授权行**粘贴到节点上执行。
+两条命令：一条在算力节点上，一条在每台笔记本上。
 
-下文命令从本仓库的 raw 地址 `https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main` 下载。若是 fork，先运行 `tools/set-raw-url.sh https://raw.githubusercontent.com/<owner>/<repo>/main`。
-
-### 1a. Windows 11 上的算力节点（WSL2）
-
-在**管理员** PowerShell 中（右键 > 以管理员身份运行）：
-
-```powershell
-irm https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.ps1 | iex
-```
-
-带参数（都可选）：
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.ps1))) -Distro Debian -User alice -AuthorizeKey 'ssh-ed25519 AAAA... laptop'
-```
-
-它会按需启用 WSL2（之后要求重启，再运行同一条命令）；没有 Debian/Ubuntu 发行版时安装 Debian；合并下文的
-`.wslconfig` 设置；在发行版里执行 Linux 端安装；添加 Hyper-V 防火墙规则；插电时不睡眠；注册开机任务，
-无需登录即可上线。最后打印 join 行。参数：`-Distro`、`-User`、`-SshPort 2222`、`-MemoryGB`、
-`-SyncRoot /Users`、`-AuthorizeKey`、`-NoDocker`、`-AllowLanPassword`、`-InstallTailscale`、
-`-SkipWslConfig`、`-SkipPower`、`-SkipTask`、`-SkipFirewall`、`-ResetTask`。
-
-要求：Windows 11 22H2 或更新（mirrored 网络模式）；装 **Windows 版** NVIDIA 驱动（WSL 里不要装 Linux 驱动）。
-创建开机任务时会问一次 Windows 账户**密码**（不是 PIN；微软账号就输微软账号密码）。
-
-### 1b. 普通 Linux 上的算力节点（Debian/Ubuntu）
+### 1. 算力节点：在 WSL2 发行版里，或在 Debian/Ubuntu 机器上
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | sudo bash -s -- node
 ```
 
-参数：`--user 用户名`（默认是执行 sudo 的用户）、`--create-user`、`--port 2222`、`--sync-root 目录`
-（可重复，默认 `/Users`）、`--authorize '公钥'`、`--allow-lan-password`、`--no-docker`、`--gpu auto|yes|no`。
-有 GPU 时先装好 NVIDIA 驱动，安装脚本检测到 GPU 会加装 NVIDIA Container Toolkit。
+在 WSL 终端里运行（需已装好 WSL2；Windows 一侧什么都不改），或在 Linux 机器上运行。它会安装 2222 端口的 sshd、
+Docker Engine（检测到 GPU 时加装 NVIDIA Container Toolkit）、Tailscale、`cn-status`/`cn-authorize`，并建好同步根目录
+`/Users`。Tailscale 登录时会打印一个网址，打开登录一次即可；无人值守安装可传入认证密钥：`... node --authkey tskey-auth-...`。
+不用 Tailscale（只走局域网）：`--no-tailscale`。
 
-两种方式最后都会打印类似：
+其他参数：`--user 用户名`（默认是执行 sudo 的用户）、`--create-user`、`--port 2222`、`--sync-root 目录`（可重复）、
+`--ts-hostname 名字`、`--key-only`、`--authorize '公钥'`、`--no-docker`、`--gpu auto|yes|no`。普通 Linux 上用 GPU 要先装好
+NVIDIA 驱动；WSL 上用 **Windows 版** NVIDIA 驱动（WSL 里不要装 Linux 驱动）。
+
+最后会打印 join 行和笔记本上要执行的命令：
 
 ```
   join: host=<机器名>.<tailnet>.ts.net user=alice port=2222 fingerprint=SHA256:...
+  curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --name <名字> --host <机器名>.<tailnet>.ts.net --user alice --port 2222
 ```
 
-### 2. 控制节点（macOS 或 Linux）
+### 2. 控制节点：笔记本（macOS 或 Linux）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --host <主机> --user <用户> --fingerprint SHA256:...
+curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --host <主机> --user <用户>
 ```
 
-它会安装 Mutagen（macOS 用 Homebrew，否则用官方发布的二进制）、docker CLI（macOS + Homebrew）、
-没有 SSH 密钥时新建一把、把 `cnode`/`rx`/`wsync` 装到 `~/.local/bin`、为每个节点生成带连接复用的
-SSH 别名和 docker context，在 `~/.claude/CLAUDE.md`（若存在 `~/.codex` 则还有 `~/.codex/AGENTS.md`）写入 agent 规则块
-（`--agent-rules 文件` 再加文件，`--no-agent-rules` 跳过），并登记该节点（默认名 `wsl`；用 `--name gpu1` 指定）。
+`host`/`user` 用 join 行里的值（笔记本要在同一个 tailnet 里；用 `--no-tailscale` 时要在同一局域网）。它会**询问一次**节点用户的
+密码，把本机的 SSH 密钥装到节点上，之后 `rx`、`wsync` 和 agent 都不会再要求输入。节点的主机密钥首次使用即信任；想预先固定，
+加上 join 行里的 `--fingerprint SHA256:...`。
+
+它还会安装 Mutagen（macOS 用 Homebrew，否则用官方二进制）、docker CLI（macOS + Homebrew）、没有 SSH 密钥时新建一把、把
+`cnode`/`rx`/`wsync` 装到 `~/.local/bin`、为每个节点生成带连接复用的 SSH 别名和 docker context，并在 `~/.claude/CLAUDE.md`
+（若存在 `~/.codex` 则还有 `~/.codex/AGENTS.md`）写入 agent 规则块（`--agent-rules 文件` 再加文件，`--no-agent-rules` 跳过）。
+节点默认名为 `wsl`，可用 `--name` 指定。之后再加节点：`cnode add <名字> --host <主机> --user <用户>`。
 `bash -s -- control --help` 查看全部参数。
 
-如果节点还不认识本机的公钥，安装脚本会打印一行，**在节点上**执行：
-
-```bash
-cn-authorize 'ssh-ed25519 AAAA... you@laptop-compute-node'
-```
-
-（Windows 上：`wsl -d <发行版> -u <用户> -- cn-authorize '...'`。）`cnode key` 可再次打印这一行。
+手头没有密码（或节点用了 `--key-only`）？在节点上以节点用户身份执行 `cnode key` 打印的那一行：
+`cn-authorize 'ssh-ed25519 AAAA... you@laptop-compute-node'`。
 
 ### 3. 验证
 
@@ -99,7 +78,7 @@ cd ~/某个项目
 wsync                  # 把当前目录同步到默认节点
 rx nproc               # 在节点的同名路径下执行
 rx nvidia-smi          # 能看到 GPU
-rx nodes               # 所有节点的状态
+rx nodes               # 所有节点的硬件和负载
 docker --context wsl run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 ```
 
@@ -112,9 +91,9 @@ docker --context wsl run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvi
 | `wsync -t [-n 节点 \| -a] [目录]` | 停止同步（两边文件都保留）。`-a`：所有节点。 |
 | `rx [-n 节点] <命令>` | 先推送本地改动，在节点的同名目录执行（登录 shell），等节点产出同步回来再返回。退出码和输出原样传回。 |
 | `rx nodes [--json]` | 并行查询所有节点（超时很短）：硬件（CPU 型号、核/线程数、实际可用 CPU、内存、GPU 型号/显存/驱动/CUDA、系统、是否 WSL）和实时负载（平均负载、可用内存、显存占用和利用率、同步根目录剩余磁盘、tmux 会话），以及同步状态。不可达的节点会被报告，不会报错退出。格式见下。 |
-| `cnode add <名> --host H --user U [--port P] [--fingerprint FP]` | 登记另一个算力节点。 |
+| `cnode add <名> --host H --user U [--port P] [--fingerprint FP]` | 登记另一个算力节点；询问一次密码并自动装好本机密钥。 |
 | `cnode list` / `cnode default [名]` / `cnode remove <名>` | 管理节点登记表。 |
-| `cnode key` | 打印本机的 `cn-authorize` 授权行。 |
+| `cnode key` | 打印本机的 `cn-authorize` 授权行（密码登录之外的手动方式）。 |
 | `ssh cn-<节点>` | 登录节点。`ssh -N -L 8888:localhost:8888 cn-<节点>` 转发端口。 |
 | `docker --context <节点> ...` | 在节点上用 Docker（安装时把第一个节点设为默认 context）。 |
 
@@ -228,90 +207,92 @@ ssh -t cn-gpu1 tmux attach -t train
 
 ## 安装脚本做了哪些更改
 
-### Windows（`install.ps1`）
+### 算力节点（`scripts/node-setup.sh`）
 
-| 更改 | 原因 |
+| 更改 | 位置 / 原因 |
 |---|---|
-| `%USERPROFILE%\.wslconfig`，合并写入（保留其他键；有变化时备份为 `.wslconfig.bak-<时间>`） | `[wsl2] memory=<内存的 75%>GB` 限制 VM 内存；`networkingMode=mirrored` 让 WSL 共用 Windows 的网卡，访问 `<Windows 主机>:2222` 就到 WSL 里的 sshd；`vmIdleTimeout=-1` 闲置时不关 VM；`[experimental] autoMemoryReclaim=gradual` 逐步把闲置缓存还给 Windows。 |
-| Hyper-V 防火墙规则 `WSL-SSH-2222` | mirrored 模式下，进入 WSL 的流量由 Hyper-V 防火墙过滤。 |
-| `powercfg`：插电时不睡眠、不休眠 | 睡着的电脑当不了算力节点。 |
-| 计划任务 `WSL Compute Node` | 开机时以你的账户运行 `wsl -d <发行版> --exec /bin/sleep infinity`，无需登录；发行版里的 systemd 拉起 sshd 和 Docker。 |
-| WSL 本身、Debian 发行版、Linux 用户 | 仅在缺少时安装/创建。 |
-
-### WSL 内 / Linux 上（`scripts/node-setup.sh`）
-
-| 更改 | 位置 |
-|---|---|
-| sshd 端口 2222（不用 22，避免和 Windows 自带的 OpenSSH 冲突）、只允许密钥、禁止 root、为 agent 调大并发会话 | `/etc/ssh/sshd_config.d/10-compute-node.conf`。Ubuntu 的 `ssh.socket` 会改成 `ssh.service`，端口才生效。`--allow-lan-password` 恢复“私有网段和 Tailscale（`100.64.0.0/10`）来源可用密码”。 |
-| Docker 官方 apt 仓库的 Docker Engine，用户加入 `docker` 组 | 已有其他来源的 `docker`（Docker Desktop 集成、`docker.io`）时跳过。 |
+| sshd 端口 2222（不用 22，避免和 Windows 自带的 OpenSSH 冲突）、密码或密钥登录、禁止 root、为 agent 调大并发会话 | `/etc/ssh/sshd_config.d/10-compute-node.conf`。Ubuntu 的 `ssh.socket` 会改成 `ssh.service`，端口才生效。`--key-only` 关闭密码登录。 |
+| Tailscale 官方 apt 仓库的 Tailscale，运行 `tailscaled` 并 `tailscale up` | 有 systemd 时作为服务；没有 systemd 时直接启动；没有 TUN 设备时用 userspace-networking 模式。`--no-tailscale` 跳过。 |
+| Docker 官方 apt 仓库的 Docker Engine，用户加入 `docker` 组 | 已有其他来源的 `docker`（Docker Desktop 集成、`docker.io`）时跳过。没有 systemd 时用它的 init 脚本启动。 |
 | NVIDIA Container Toolkit（`--gpus all`） | 仅在检测到 NVIDIA GPU 时安装。 |
 | inotify 上限（Mutagen、构建工具） | `/etc/sysctl.d/90-compute-node.conf` |
 | 让 SSH 会话找到 `nvidia-smi`（WSL 只给本地终端加 `/usr/lib/wsl/lib`） | `/usr/local/bin/nvidia-smi`、`/etc/profile.d/wsl-lib.sh`（仅 WSL） |
 | 同步根目录 `/Users`，归节点用户所有 | 对应 macOS 路径。Linux 控制节点请加 `--sync-root /home/<你>`。 |
 | `cn-status`、`cn-authorize` | `/usr/local/bin`，设置在 `/etc/compute-node.conf` |
-| WSL 上的 systemd | `/etc/wsl.conf [boot] systemd=true`（以及 `[user] default=`）；以退出码 10 结束，提示重启发行版（install.ps1 会自动处理）。 |
-
-没有 systemd 时（容器、部分精简系统）会直接启动 sshd，不启动 Docker。
+| WSL 上的 systemd | `/etc/wsl.conf [boot] systemd=true` 和 `[user] default=`，发行版下次启动时生效；在那之前各服务直接启动，现在不需要重启任何东西。 |
 
 ### 控制节点（`scripts/control-setup.sh`、`bin/cnode`）
 
 | 更改 | 说明 |
 |---|---|
 | `~/.ssh/config` 最顶部的标记块：`Include ~/.config/compute-node/ssh_config` | `Include` 必须在所有 `Host` 之前。旧版单节点安装写的块（`# BEGIN wsl-compute`）会被迁移并删除。 |
-| `~/.config/compute-node/` | `nodes`、`default`、生成的 `ssh_config`（每个节点一个 `Host cn-<名字>`，`ControlMaster`/`ControlPersist 30m`，macOS 上用钥匙串）、`known_hosts`（固定的主机密钥）。 |
+| `~/.config/compute-node/` | `nodes`、`default`、生成的 `ssh_config`（每个节点一个 `Host cn-<名字>`，`ControlMaster`/`ControlPersist 30m`，macOS 上用钥匙串）、`known_hosts`（主机密钥：首次使用即信任，或用 `--fingerprint` 预先固定）。 |
 | `~/.local/bin/cnode`、`rx`、`wsync`（符号链接）、`~/.local/share/compute-node/cn-status` | 需要时在 shell 配置文件里加 PATH。 |
 | `~/.ssh/id_ed25519` | 仅在缺少时新建；有密码短语时存入 macOS 钥匙串。 |
 | Mutagen 守护进程、每个节点一个 docker context | 默认 `docker context use <第一个节点>`，`--keep-docker-context` 可跳过。 |
 | `~/.claude/CLAUDE.md`（及 `~/.codex/AGENTS.md`）中的 agent 规则块 | 在标记之间，原位替换；`--no-agent-rules` 跳过。 |
 
+## 仍需 Windows 一侧处理的事（WSL 节点）
+
+本工具不改 Windows 一侧的任何东西。以下几点无法在发行版内部完成：
+
+- **WSL2 本身**要已安装，并有 Debian 或 Ubuntu 发行版（`wsl --install -d Debian`）。
+- **发行版必须在运行。** 最后一个 Windows 侧进程（终端）退出几秒后 WSL 会停掉发行版，闲置时还会停掉 VM；systemd 服务不能让它保持运行，
+  Windows 重启后也不会自动启动。请保持一个 WSL 终端开着，或自己在 Windows 上设置：`%USERPROFILE%\.wslconfig` 的 `[wsl2]` 下加
+  `vmIdleTimeout=-1`，再建一个登录/开机任务运行 `wsl -d <发行版> --exec sleep infinity`。
+- **睡眠**：睡着的电脑当不了算力节点（Windows 电源设置）。
+- **GPU 驱动**：WSL 里的 CUDA 由 Windows 版 NVIDIA 驱动提供。
+- **不用 Tailscale 时的局域网访问**：WSL 默认的 NAT 模式下其他机器连不到发行版，需要 Windows 一侧做端口转发，或使用
+  `networkingMode=mirrored`（再加一条 Hyper-V 防火墙规则）。在发行版里跑 Tailscale 可以完全绕开这些。
+- 如果 Windows 本身也运行 Tailscale，**并且** WSL 用了 mirrored 网络，两者可能冲突；这种情况用 `--no-tailscale`，host 填 Windows 的 Tailscale 名字。
+
 ## 安全模型
 
-- 节点上的 sshd **只接受密钥**（除非 `--allow-lan-password`），禁止 root 登录。控制节点要在节点上执行
-  `cn-authorize '<它的公钥>'` 才能登录。
-- 主机密钥是**固定的**：`cnode add` 读取节点的主机密钥，只有与 join 行里的 `--fingerprint`（或你已在
-  `~/.ssh/known_hosts` 里信任过的密钥）一致才接受。别名使用 `StrictHostKeyChecking yes` 和按别名记录的专用
-  known_hosts，所以 IP 变化（局域网/Tailscale）没关系，密钥变化会被拒绝。`--accept-new`（或在终端里回答 `y`）
-  是“首次使用即信任”：在自己可控的网络里方便，但第一次连接时如果被冒充也会接受。
+本工具优先考虑易部署，需要时再加固。
+
+- sshd 接受**密码和密钥**（禁止 root）。每个控制节点只需要用一次密码：`cnode add` 用它登录并装好该机的密钥，之后都走密钥。
+  所有控制节点都加好后，可以用 `--key-only` 重跑节点安装来关闭密码登录。
+- 主机密钥**首次使用即信任**，之后按节点固定在专用 known_hosts 里（`StrictHostKeyChecking yes`），所以密钥**变化**会被拒绝
+  （若是预期的变化：先 `cnode remove` 再 `cnode add`）。在不信任的网络里，传入 join 行里的 `--fingerprint`，第一次连接也会被验证。
+- 用 Tailscale 时，只有你 tailnet 里的机器能连到 2222 端口；用 `--no-tailscale` 时端口对局域网开放。
 - 能运行 `rx` 的人就能以节点用户身份执行任何命令，节点上写的文件也会同步回笔记本。请把节点当作你的另一个账户对待。
+- `CN_PASSWORD`（用于脚本化的 `cnode add`）会把密码放进那一条命令的环境变量里；能手动输入就手动输入。
 
-## 网络：推荐 Tailscale，或局域网
+## 网络：默认 Tailscale，或局域网
 
-Tailscale 给每台机器一个固定名字（`<机器名>.<tailnet>.ts.net`），在哪都能连，同一局域网内通常直连。
-Windows 节点：安装 Tailscale（或用 `-InstallTailscale`），登录，在托盘菜单里打开 **Run unattended**。笔记本：打开
-**Launch at login**。管理后台里给两台机器都选 **Disable key expiry**（否则约 180 天后登录过期），保持 **MagicDNS** 开启。
-`tailscale ping <主机>` 应显示 `via <局域网IP>`；`via DERP` 表示走中继（较慢，检查 UDP 41641）。不用 Tailscale 时填节点的
-局域网 IP（mirrored 模式下就是 Windows 的 IP）。如果 Windows 的 Tailscale 地址连不到 WSL，可以改在发行版里装 Tailscale。
+Tailscale 给每台机器一个固定名字（`<机器名>.<tailnet>.ts.net`），在哪都能连，同一局域网内通常直连。节点安装会在 WSL 发行版或
+Linux 机器内部运行它，所以不需要改路由器或 Windows。笔记本上也装 Tailscale 并登录同一个 tailnet。管理后台里给节点选
+**Disable key expiry**（否则约 180 天后登录过期），保持 **MagicDNS** 开启。`tailscale ping <主机>` 应显示 `via <局域网IP>`；
+`via DERP` 表示走中继（较慢，检查 UDP 41641）。不用 Tailscale 时填节点的局域网 IP（`--no-tailscale`）。
 
 ## 限制
 
-- **WSL 内存**：VM 受 `.wslconfig` 的 `memory=` 限制（默认物理内存的 75%），并与 Windows 争用；节点同时被人日常使用时，
-  重负载会让两边都卡。可在 `[wsl2]` 下加 `processors=<N>` 限制核数。
-- **容器当算力节点**：Docker 或 RunPod 容器可以提供 `rx`/`wsync`（没有 systemd 也会直接启动 sshd），但跑不了 Docker
-  Engine：非特权容器无法创建它需要的命名空间和 cgroup，也无法承载 rootless Docker 所需的用户命名空间。这种情况用 `--no-docker`。
+- **WSL 内存**：WSL 最多只能用 Windows 内存的一部分（默认一半），并与 Windows 争用；`rx nodes` 显示实际可用量。调整上限属于 Windows
+  设置（`.wslconfig` 的 `memory=`）。
+- **容器当算力节点**：Docker 或 RunPod 容器可以提供 `rx`/`wsync`（没有 systemd 也会直接启动 sshd 和 tailscaled，Tailscale 用
+  userspace 模式），但跑不了 Docker Engine：非特权容器无法创建它需要的命名空间和 cgroup，也无法承载 rootless Docker 所需的用户命名空间。
+  这种情况用 `--no-docker`。
 - 每次 `rx` 约多 0.1–0.5 秒；正常任务可忽略，不适合成千上万次零碎调用。
-- 大文件的瓶颈在网络：数据集直接在节点上下载，不要经同步传。节点尽量插网线。
-- 路径必须一致：macOS 控制节点对应节点上的 `/Users/...`；Linux 控制节点需要把自己的家目录路径（如 `/home/alice`）
-  加为节点的同步根目录。
-- 不支持 Windows 10（没有 mirrored 网络）。算力节点只支持 Debian/Ubuntu 及其衍生版。
+- 大文件的瓶颈在网络：数据集直接在节点上下载，不要经同步传。
+- 路径必须一致：macOS 控制节点对应节点上的 `/Users/...`；Linux 控制节点需要把自己的家目录路径（如 `/home/alice`）加为节点的同步根目录。
+- 算力节点只支持 Debian/Ubuntu 及其衍生版。
 - 不调度、agent 之间不加锁：`rx nodes` 显示正在运行的任务，选哪个节点由你或 agent 决定。
 
 ## 故障排查
 
 | 现象 | 原因 / 解决 |
 |---|---|
-| PowerShell 输出乱码并报 `You cannot call a method on a null-valued expression` | Windows PowerShell 5.1 把无 BOM 的 UTF-8 当本地代码页读。所以 `install.ps1` 只含 ASCII 字符，修改时请保持。 |
-| 启动脚本时报 `Unexpected token` | 运行下载的副本要写完整路径：`powershell -ExecutionPolicy Bypass -File <完整路径>\install.ps1`。 |
+| 过一段时间节点就连不上了（WSL） | 发行版或 WSL VM 停了，见“仍需 Windows 一侧处理的事”。打开一个 WSL 终端即可重新启动。 |
+| `tailscale up` 一直等待 | 打开打印的网址登录，或用 `--authkey` 重跑。用 `tailscale status` 检查。 |
 | 通过 SSH 执行时 `nvidia-smi: command not found` | 重跑节点安装（会把 `nvidia-smi` 链接到 `/usr/local/bin`）。 |
 | `rx` 或同步卡住、要求输入密码短语 | 密钥的密码短语不在 agent/钥匙串里：`ssh-add --apple-use-keychain ~/.ssh/id_ed25519`（macOS）。 |
-| 连不上 2222 端口 | 在 Windows 上确认：`wsl -l -v` 显示 Running；`.wslconfig` 里是 `networkingMode=mirrored` 且之后执行过 `wsl --shutdown`；`Get-NetFirewallHyperVRule -Name WSL-SSH-2222` 存在；用局域网 IP 试试以排除 Tailscale。 |
-| `Host key verification failed` | 节点的主机密钥变了（重装过？）或连到了别的机器。在节点上核对指纹（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`），再用 `cnode add ... --fingerprint` 重新登记。 |
-| `Permission denied (publickey)` | 以节点用户身份在节点上执行 `cnode key` 打印的那一行。 |
+| `cnode add` 在密码登录这一步失败 | 密码错误、节点用户没有密码（在节点上 `sudo passwd <用户>`），或节点用了 `--key-only`：改为在节点上执行 `cnode key` 打印的那一行。 |
+| 连不上 2222 端口 | 节点在运行吗（两边 `tailscale status`）？在同一个 tailnet 吗？WSL 上不用 Tailscale 时见上文“局域网访问”。 |
+| `host key ... CHANGED` / `Host key verification failed` | 节点重装过，或连到了别的机器。在节点上核对（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`）；若是预期的：`cnode remove <节点>` 后重新添加。 |
 | `rx: ... does not exist on <节点>` | 这个目录没有同步到该节点：在项目根运行 `wsync -n <节点>`。 |
 | `tailscale ping` 显示 `via DERP` | 走了中继：是否在同一局域网？路由器是否拦了 UDP 41641？ |
-| `client version != tailscaled server version` | 只是警告，升级 Tailscale 命令行即可。 |
 | 同步冲突 | 以控制节点为准；用 `wsync -l` 或 `mutagen sync monitor` 查看。 |
-| 节点上 docker 报 `permission denied` | 加入组后要重新登录：`wsl --shutdown` 后重新启动（或注销再登录）。 |
-| `wsl --shutdown` 或崩溃后节点不见了 | `Start-ScheduledTask "WSL Compute Node"`。改过 Windows 密码？用 `-SkipWslConfig -ResetTask` 重跑。 |
+| 节点上 docker 报 `permission denied` | 加入组后要重新登录（WSL 上：关掉所有 WSL 终端，或 `wsl --terminate <发行版>`）。 |
 
 ## 卸载
 
@@ -324,25 +305,23 @@ rm -rf ~/.local/bin/{cnode,rx,wsync} ~/.local/share/compute-node ~/.config/compu
 awk '/^# BEGIN compute-node$/{s=1;next} /^# END compute-node$/{s=0;next} !s' ~/.ssh/config > ~/.ssh/config.new && mv ~/.ssh/config.new ~/.ssh/config
 ```
 
-Windows（管理员）：
-```powershell
-Unregister-ScheduledTask -TaskName 'WSL Compute Node' -Confirm:$false
-Remove-NetFirewallHyperVRule -Name WSL-SSH-2222
-# 想恢复旧的 .wslconfig，就把 %USERPROFILE%\.wslconfig.bak-<时间> 改回 .wslconfig
-```
-
-Linux / WSL：
+算力节点（WSL 或 Linux）：
 ```bash
 sudo rm /etc/ssh/sshd_config.d/10-compute-node.conf /etc/sysctl.d/90-compute-node.conf /etc/compute-node.conf \
         /usr/local/bin/cn-status /usr/local/bin/cn-authorize /etc/profile.d/wsl-lib.sh /usr/local/bin/nvidia-smi
 sudo systemctl restart ssh   # 或者停用：sudo systemctl disable --now ssh
+sudo tailscale logout; sudo apt-get purge tailscale
 sudo apt-get purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin nvidia-container-toolkit
 # /Users 下是同步过来的项目副本，确认不再需要后再手动删除
 ```
 
+安装脚本从 `https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main` 下载；用 fork 或某个 tag 时设置 `CN_RAW_URL`。
+
 ## 测试
 
-`tests/run.sh [lint|control|node|multinode|ps|all]` 运行所有不需要真实 Windows 安装的测试（详见英文 README 的 Tests 一节）。
+`tests/run.sh [lint|control|node|multinode|all]` 运行全部测试，不触碰真实机器（详见英文 README 的 Tests 一节）：控制节点安装（桩替身）、
+Debian/Ubuntu 容器里的节点安装（密码与密钥登录、`--key-only`、真实 Tailscale 软件包 + 桩替身的守护进程与登录、`--no-tailscale`）、
+以及两个节点容器 + 两个控制用户的端到端测试（`cnode add` 用密码自动装密钥、首次信任与指纹固定、手动 `cn-authorize`）。
 Docker 测试使用当前 docker context，引擎可用内存低于 `MIN_AVAILABLE_MB`（6000）时自动跳过；不使用 GPU。
 
 ## 许可证

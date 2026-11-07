@@ -2,16 +2,16 @@
 # compute-node installer. One command per role:
 #
 #   control node (macOS / Linux, as your normal user):
-#     curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --host <host> --user <user> [--fingerprint SHA256:...]
+#     curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --host <host> --user <user>
 #   compute node (Debian/Ubuntu, plain Linux or inside WSL2), as root:
 #     curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | sudo bash -s -- node [--user <user>]
-#   (Windows: use install.ps1, which sets up WSL2 and then runs the node role inside it.)
+#   On Windows, run the node command inside the WSL2 distro; nothing on the Windows side is changed.
 #
 # `install.sh control --help` / `install.sh node --help` list all options. Safe to re-run.
 # From a git checkout the local files are used; otherwise the few needed files are fetched
 # from CN_RAW_URL (default below; CN_RAW_URL=<url> overrides it, e.g. to pin a tag).
 
-CN_RAW_URL_DEFAULT='https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main'   # e.g. https://raw.githubusercontent.com/<owner>/<repo>/main
+CN_RAW_URL_DEFAULT='https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main'
 
 set -euo pipefail
 src=""
@@ -31,7 +31,7 @@ main() {
   if [ -n "$here" ] && [ -f "$here/scripts/$role-setup.sh" ]; then
     src="$here"
   else
-    case "$CN_RAW_URL" in *'https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main'*) echo "install.sh: CN_RAW_URL is not set (this copy has no download URL)" >&2; return 1 ;; esac
+    case "$CN_RAW_URL" in http://*|https://*|file://*) ;; *) echo "install.sh: CN_RAW_URL is not a URL: $CN_RAW_URL" >&2; return 1 ;; esac
     src="$(mktemp -d "${TMPDIR:-/tmp}/compute-node.XXXXXX")"
     trap 'rm -rf "$src"' EXIT
     local files=(scripts/"$role"-setup.sh node/cn-status)

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.0 - 2026-11-07
+
+Simpler deployment: one command inside WSL (or on a Linux box), one on the laptop.
+
+- Removed the Windows PowerShell installer (`install.ps1`) and every Windows-side change
+  (enabling WSL, distro registration, `.wslconfig`, firewall rule, power settings, boot task).
+  The compute node is set up entirely from inside the WSL2 distro or Linux machine; what still
+  needs Windows is documented in "What still needs Windows".
+- Tailscale is installed and started inside the distro by default (systemd service, or started
+  directly without systemd, userspace networking without a TUN device); `tailscale up` prints the
+  login URL, `--authkey` logs in unattended, `--ts-hostname` names the machine, `--no-tailscale`
+  keeps LAN-only.
+- No restart step on WSL: systemd is enabled for the next start while services are started
+  directly now (the old exit code 10 is gone).
+- sshd accepts passwords by default (keys keep working; `--key-only` hardens it, replacing
+  `--allow-lan-password`). `cnode add` logs in once with the password (prompt, or `CN_PASSWORD`)
+  and installs the control node's key, so later `rx`/`wsync` calls never prompt. `cn-authorize`
+  stays as a manual alternative.
+- Host keys are trusted on first use by default and pinned afterwards; a changed key is refused.
+  `--fingerprint` remains for pinning up front; `--accept-new` and `--copy-id` are now no-ops.
+- Fixed: the piped install (`curl | bash`) refused the real download URL after it was filled in;
+  `tools/set-raw-url.sh` is removed.
+- Tests: password login and automatic key install, Tailscale package with stubbed daemon and
+  login, `--no-tailscale`, the piped install; the PowerShell tests are removed.
+
 ## 0.1.0 - unreleased
 
 First public release, generalised from a private three-script setup (WSL root setup, Windows

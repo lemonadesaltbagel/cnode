@@ -22,14 +22,15 @@ done
 
 # as <user> <shell snippet>   run on the control container as alice or bob, in a login-like env
 as() { local u="$1"; shift
-  docker exec -i -u "$u" -e HOME="/home/$u" -e USER="$u" -e SHELL=/bin/bash -e LANG=C.UTF-8 \
+  docker exec -i -u "$u" -e HOME="/home/$u" -e USER="$u" -e SHELL=/bin/bash -e LANG=C.UTF-8 ${PW:+-e CN_PASSWORD="$PW"} \
     -e PATH="/home/$u/.local/bin:/usr/local/bin:/usr/bin:/bin" -w "/home/$u" "$CTL" bash -c "$*" </dev/null; }
 
 FP_n1=""; FP_n2=""
 echo "-- compute nodes"
 for c in "$N1" "$N2"; do
-  out="$(docker exec "$c" bash /src/install.sh node --user dev --create-user --no-docker 2>&1)"; rc=$?
+  out="$(docker exec "$c" bash /src/install.sh node --user dev --create-user --no-docker --no-tailscale 2>&1)"; rc=$?
   check "$c: node install exits 0" test "$rc" = 0
+  docker exec "$c" sh -c 'echo dev:node-pass | chpasswd'   # what the user would type at --create-user
   fp="$(echo "$out" | sed -n 's/.*join: .*fingerprint=\(SHA256:[^ ]*\).*/\1/p' | head -n1)"
   check "$c: join line has a fingerprint" test -n "$fp"
   case "$c" in "$N1") FP_n1="$fp" ;; *) FP_n2="$fp" ;; esac
@@ -41,18 +42,20 @@ docker exec "$CTL" sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive a
   && mkdir -p /Users/alice/proj /Users/bob/proj && chown -R alice /Users/alice && chown -R bob /Users/bob' >/dev/null 2>&1
 check "control container ready" docker exec "$CTL" id bob
 
-out="$(as alice "bash /src/install.sh control --name n1 --host $N1 --user dev --fingerprint $FP_n1 --no-docker --agent-rules /home/alice/AGENTS.md" 2>&1)"; rc=$?
-echo "$out" | grep -E 'mutagen|not authorized|cn-authorize' | head -n 4 | sed 's/^/    | /'
-check "alice: install exits 0 although the key is not authorized yet" test "$rc" = 0
+# alice: the password is used once (CN_PASSWORD stands in for typing it), the key goes in by itself
+out="$(PW=node-pass as alice "bash /src/install.sh control --name n1 --host $N1 --user dev --fingerprint $FP_n1 --no-docker --agent-rules /home/alice/AGENTS.md" 2>&1)"; rc=$?
+echo "$out" | grep -E 'mutagen|password|key login|installed this' | head -n 5 | sed 's/^/    | /'
+check "alice: install exits 0" test "$rc" = 0
 check "alice: real mutagen installed" as alice 'mutagen version'
-check "alice: install prints the cn-authorize line" sh -c 'echo "$1" | grep -q "cn-authorize '"'"'ssh-ed25519 "' _ "$out"
+check "alice: key installed on n1 through the one password login" sh -c 'echo "$1" | grep -q "installed this machine'"'"'s key on '"'"'n1'"'"'"' _ "$out"
 check "alice: AGENTS.md rules mention rx nodes --json" as alice 'grep -q "rx nodes --json" AGENTS.md'
 KA="$(as alice 'cnode key')"
-check "authorize alice on n1 (cn-authorize, as dev)" docker exec -u dev "$N1" bash -c "$KA"
-check "authorize alice on n2" docker exec -u dev "$N2" bash -c "$KA"
-check "alice: key login to n1 works now" as alice 'ssh -o BatchMode=yes cn-n1 true'
+check "alice: key login to n1 works without a password now" as alice 'ssh -o BatchMode=yes cn-n1 true'
+check "alice: cnode add n2 (no fingerprint: trust on first use, password once)" sh -c "PW=node-pass; docker exec -u alice -e HOME=/home/alice -e CN_PASSWORD=\$PW $CTL /home/alice/.local/bin/cnode add n2 --host $N2 --user dev | grep -q 'first use: $FP_n2'"
+check "alice: key login to n2" as alice 'ssh -o BatchMode=yes cn-n2 true'
+PW=node-pass as alice "cnode add n1 --host $N1 --user dev" >/dev/null 2>&1
+check "re-adding does not duplicate the key on the node" sh -c "[ \"\$(docker exec $N1 grep -c alice@ /home/dev/.ssh/authorized_keys)\" = 1 ]"
 check "alice: rx outside a synced path explains itself" sh -c "docker exec -u alice -e HOME=/home/alice -w /home/alice $CTL /home/alice/.local/bin/rx -n n1 true 2>&1 | grep -q 'does not exist on n1'"
-check "alice: cnode add n2 with the right fingerprint" as alice "cnode add n2 --host $N2 --user dev --fingerprint $FP_n2"
 check "alice: wrong fingerprint refused" sh -c "! docker exec -u alice -e HOME=/home/alice $CTL /home/alice/.local/bin/cnode add n3 --host $N1 --user dev --fingerprint SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 check "alice: n1 key does not pass for n2 (pinned per node)" sh -c "! docker exec -u alice -e HOME=/home/alice $CTL /home/alice/.local/bin/cnode add n2b --host $N2 --user dev --fingerprint $FP_n1"
 check "alice: two nodes registered, default n1" as alice '[ "$(cnode list | grep -c "dev@")" = 2 ] && [ "$(cnode default)" = n1 ]'
@@ -83,14 +86,14 @@ check "hardware (cpu model, RAM) and load (mem, disk) reported" sh -c 'printf "%
 check "n2 lists tmux job1" sh -c 'printf "%s\n" "$1" | docker exec -i '"$CTL"' jq -e ".[] | select(.name==\"n2\") | .load.tmux | index(\"job1\") != null"' _ "$J"
 check "each node shows its sync session for the folder" sh -c 'printf "%s\n" "$1" | docker exec -i '"$CTL"' jq -e "all(.[]; .sync | map(.path) | index(\"/Users/alice/proj\") != null)"' _ "$J"
 
-echo "-- second control node (bob): TOFU with --accept-new, then both nodes"
-out="$(as bob "bash /src/install.sh control --name n2 --host $N2 --user dev --accept-new --no-docker" 2>&1)"; rc=$?
-check "bob: install exits 0" test "$rc" = 0
+echo "-- second control node (bob): no password at hand, so the optional manual path (cn-authorize)"
+out="$(as bob "bash /src/install.sh control --name n2 --host $N2 --user dev --no-docker" 2>&1)"; rc=$?
+check "bob: install exits 0 and prints the cn-authorize fallback" sh -c '[ "$2" = 0 ] && echo "$1" | grep -q "cn-authorize '"'"'ssh-ed25519 "' _ "$out" "$rc"
 KB="$(as bob 'cnode key')"
 check "bob's key differs from alice's" test "$KA" != "$KB"
 docker exec -u dev "$N2" bash -c "$KB" >/dev/null && docker exec -u dev "$N1" bash -c "$KB" >/dev/null
-check "bob: key login to n2" as bob 'ssh -o BatchMode=yes cn-n2 true'
-check "bob: cnode add n1" as bob "cnode add n1 --host $N1 --user dev --fingerprint $FP_n1"
+check "bob: key login to n2 after cn-authorize" as bob 'ssh -o BatchMode=yes cn-n2 true'
+check "bob: cnode add n1 (already authorized: no password needed)" as bob "cnode add n1 --host $N1 --user dev --fingerprint $FP_n1"
 as bob 'echo bob >/Users/bob/proj/b.txt'
 check "bob: wsync -n n2" as bob 'cd /Users/bob/proj && wsync -n n2'
 check "bob: rx -n n2 sees bob's files" as bob 'cd /Users/bob/proj && [ "$(rx -n n2 cat b.txt)" = bob ]'

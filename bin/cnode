@@ -5,7 +5,9 @@
 # it picks its behaviour from the name it was called by.
 #
 #   cnode add <name> --host H --user U [--port 2222] [--fingerprint SHA256:...]
-#                    [--accept-new] [--default] [--copy-id] [--docker-default]
+#                    [--default] [--docker-default]
+#                    first login uses U's password once (prompt, or env CN_PASSWORD) to install
+#                    this machine's key; the host key is trusted on first use unless --fingerprint
 #   cnode remove <name>          cnode list          cnode default [<name>]
 #   cnode status [--json] [<name>...]   (same as: rx nodes [--json])
 #   cnode key                    print the line to run on a compute node to authorize this machine
@@ -23,7 +25,7 @@
 #        CN_NO_DOCKER=1 (cnode add/remove: leave docker contexts alone)
 set -uo pipefail
 
-CN_VERSION="0.1.0"
+CN_VERSION="0.2.0"
 CN_HOME="${CN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/compute-node}"
 NODES_FILE="$CN_HOME/nodes"
 DEFAULT_FILE="$CN_HOME/default"
@@ -150,7 +152,7 @@ cmd_init() {
 fingerprints_of() { ssh-keygen -lf "$1" 2>/dev/null | awk '{print $2}'; }
 
 verify_host_key() { # verify_host_key NAME HOST PORT FINGERPRINT ACCEPT_NEW
-  local n="$1" h="$2" p="$3" want="$4" accept="$5" al tmp ktmp fp line known=""
+  local n="$1" h="$2" p="$3" want="$4" al tmp ktmp fp line known=""
   al="$(alias_of "$n")"
   tmp="$(mktemp "${TMPDIR:-/tmp}/cnode.XXXXXX")"; ktmp="$tmp.k"
   ssh-keyscan -T 5 -p "$p" -t ed25519,ecdsa,rsa "$h" 2>/dev/null | awk -v a="$al" 'NF>=3 && $1!~/^#/{ $1=a; print }' >"$tmp"
@@ -169,15 +171,16 @@ verify_host_key() { # verify_host_key NAME HOST PORT FINGERPRINT ACCEPT_NEW
       echo "Host key fingerprints offered by $h:$p:" >&2; fingerprints_of "$tmp" | sed 's/^/    /' >&2
       rm -f "$tmp" "$ktmp"; die "none matches --fingerprint $want - refusing to connect (wrong host or man-in-the-middle?)"
     fi
-    echo "The host key of $h:$p is not known yet. Fingerprints:"; fingerprints_of "$tmp" | sed 's/^/    /'
-    echo "Compare with the 'fingerprint' in the join line printed by the compute-node install"
-    echo "(or on the node: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub)."
-    if [ "$accept" = 1 ]; then echo "--accept-new given: trusting it."
-    elif (exec </dev/tty) 2>/dev/null; then
-      local ans; printf 'Trust this host key? [y/N] '; read -r ans </dev/tty
-      case "$ans" in y|Y|yes|YES) ;; *) rm -f "$tmp" "$ktmp"; die "aborted" ;; esac
-    else rm -f "$tmp" "$ktmp"; die "pass --fingerprint SHA256:... (preferred) or --accept-new"; fi
+    if [ -f "$KNOWN" ] && [ -n "$(ssh-keygen -F "$al" -f "$KNOWN" 2>/dev/null)" ]; then
+      echo "Host key fingerprints offered by $h:$p:" >&2; fingerprints_of "$tmp" | sed 's/^/    /' >&2
+      rm -f "$tmp" "$ktmp"
+      die "the host key of node '$n' CHANGED since it was added - refusing (reinstalled node, or another machine?). If expected: cnode remove $n, then add it again (ideally with --fingerprint)."
+    fi
+    # trust on first use: remember the key now; any later change is refused
     known="$(grep ' ssh-ed25519 ' "$tmp" | head -n1)"; [ -n "$known" ] || known="$(head -n1 "$tmp")"
+    printf '%s\n' "$known" >"$ktmp"
+    echo "trusting the host key of $h:$p on first use: $(fingerprints_of "$ktmp")"
+    echo "  (compare with 'fingerprint=' in the node's join line; --fingerprint pins it up front)"
   fi
   { [ -f "$KNOWN" ] && awk -v a="$al" '$1!=a' "$KNOWN"; printf '%s\n' "$known"; } | atomic_write "$KNOWN"
   chmod 600 "$KNOWN"
@@ -190,18 +193,43 @@ authorize_line() {
   echo "cn-authorize '$(cat "$pub")'"
 }
 
+# install_key NAME USER ALIAS: log in once with the password (ssh prompt, or CN_PASSWORD through
+# SSH_ASKPASS) and append this machine's public key to the node user's authorized_keys.
+install_key() {
+  local n="$1" u="$2" al="$3" pub qpub askdir="" rc
+  pub="$(cat "$(key_path).pub")" || return 1
+  qpub="$(printf %q "$pub")"
+  if [ -n "${CN_PASSWORD:-}" ]; then
+    askdir="$(mktemp -d "${TMPDIR:-/tmp}/cnode.XXXXXX")"
+    # shellcheck disable=SC2016
+    printf '#!/bin/sh\nprintf "%%s\\n" "$CN_PASSWORD"\n' >"$askdir/askpass"; chmod 700 "$askdir/askpass"
+    export SSH_ASKPASS="$askdir/askpass" SSH_ASKPASS_REQUIRE=force CN_PASSWORD
+  elif ! (exec </dev/tty) 2>/dev/null; then
+    echo "${PROG}: no terminal to ask for $u's password on '$n' (set CN_PASSWORD, or use cn-authorize)" >&2
+    return 1
+  fi
+  echo "logging in to '$n' once with $u's password to install this machine's key"
+  ssh -o ControlMaster=no -o ControlPath=none -o PubkeyAuthentication=no \
+      -o PreferredAuthentications=password,keyboard-interactive -o NumberOfPasswordPrompts=3 -o ConnectTimeout=10 \
+      "$al" "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && { grep -qxF $qpub ~/.ssh/authorized_keys || printf '%s\n' $qpub >>~/.ssh/authorized_keys; }" </dev/null
+  rc=$?
+  [ -n "$askdir" ] && rm -rf "$askdir"
+  unset SSH_ASKPASS SSH_ASKPASS_REQUIRE
+  [ $rc = 0 ] && echo "installed this machine's key on '$n'"
+  return $rc
+}
+
 # ---- cnode add/remove/list/default -------------------------------------------------------
 cmd_add() {
-  local n="" h="" u="" p=2222 fp="" accept=0 mkdef=0 copyid=0 dockdef=0
+  local n="" h="" u="" p=2222 fp="" mkdef=0 dockdef=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --host) h="${2:?}"; shift 2 ;;
       --user) u="${2:?}"; shift 2 ;;
       --port) p="${2:?}"; shift 2 ;;
       --fingerprint) fp="${2:?}"; shift 2 ;;
-      --accept-new) accept=1; shift ;;
+      --accept-new|--copy-id) shift ;;   # (now the default behaviour)
       --default) mkdef=1; shift ;;
-      --copy-id) copyid=1; shift ;;
       --docker-default) dockdef=1; shift ;;
       -*) die "add: unknown option $1" ;;
       *) [ -z "$n" ] || die "add: unexpected argument $1"; n="$1"; shift ;;
@@ -211,8 +239,9 @@ cmd_add() {
   valid_name "$n" || die "node name must match [a-z][a-z0-9-]* (max 31 chars) and not be 'default'"
   [[ "$p" =~ ^[0-9]+$ ]] || die "bad port: $p"
   cmd_init
-  verify_host_key "$n" "$h" "$p" "$fp" "$accept"
-  { awk -v n="$n" '$1!=n' "$NODES_FILE"; echo "$n $h $u $p"; } | atomic_write "$NODES_FILE"
+  verify_host_key "$n" "$h" "$p" "$fp"
+  # replace the node's line in place (keeps the order), or append it
+  awk -v n="$n" -v l="$n $h $u $p" '$1==n{if(!d)print l; d=1; next} {print} END{if(!d)print l}' "$NODES_FILE" | atomic_write "$NODES_FILE"
   gen_ssh_config
   local al; al="$(alias_of "$n")"
   ssh -O exit "$al" >/dev/null 2>&1 || true     # drop a stale master from an earlier config
@@ -220,21 +249,15 @@ cmd_add() {
   echo "registered node '$n' -> $u@$h:$p (ssh alias: $al)"
 
   if ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$al" true 2>/dev/null; then
-    if [ "$copyid" = 1 ]; then
-      ssh-copy-id -i "$(key_path).pub" "$al" || true
-    else
-      echo
-      echo "This machine's key is not authorized on '$n' yet. On the compute node, as $u, run:"
-      echo
-      echo "    $(authorize_line)"
-      echo
-      if (exec </dev/tty) 2>/dev/null && [ -t 1 ]; then
-        printf 'Press Enter when done (or Ctrl-C and re-run "cnode add" later) '; read -r _ </dev/tty
-      fi
-    fi
+    install_key "$n" "$u" "$al" || true
     ssh -O exit "$al" >/dev/null 2>&1 || true
-    ssh -o BatchMode=yes -o ConnectTimeout=8 "$al" true 2>/dev/null \
-      || { echo "${PROG}: key login to '$n' not working yet; after authorizing, check with: cnode status $n" >&2; return 3; }
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$al" true 2>/dev/null; then
+      echo
+      echo "Could not install this machine's key on '$n' with a password. Alternative: on the node, as $u, run"
+      echo "    $(authorize_line)"
+      echo "then check with: cnode status $n"
+      return 3
+    fi
   fi
   echo "key login to '$n' OK"
   if have docker && [ -z "${CN_NO_DOCKER:-}" ]; then

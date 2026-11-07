@@ -14,15 +14,23 @@ mkdir -p "$STUBS" "$STATE"; : >"$LOG"; : >"$STATE/sessions"; : >"$STATE/contexts
 ssh-keygen -q -t ed25519 -N '' -f "$W/hostkey" -C testhost
 HOSTPUB="$(cut -d' ' -f1,2 "$W/hostkey.pub")"
 HOSTFP="$(ssh-keygen -lf "$W/hostkey.pub" | awk '{print $2}')"
+ssh-keygen -q -t ed25519 -N '' -f "$W/altkey" -C otherhost
+ALTPUB="$(cut -d' ' -f1,2 "$W/altkey.pub")"
 
-stub() { printf '#!/usr/bin/env bash\nLOG=%q; STATE=%q; HOSTPUB=%q\necho "$(basename "$0") $*" >>"$LOG"\n%s\n' "$LOG" "$STATE" "$HOSTPUB" "$2" >"$STUBS/$1"; chmod +x "$STUBS/$1"; }
-stub ssh-keyscan 'host="${!#}"; echo "$host $HOSTPUB"'
+stub() { printf '#!/usr/bin/env bash\nLOG=%q; STATE=%q; HOSTPUB=%q; ALTPUB=%q\necho "$(basename "$0") $*" >>"$LOG"\n%s\n' "$LOG" "$STATE" "$HOSTPUB" "$ALTPUB" "$2" >"$STUBS/$1"; chmod +x "$STUBS/$1"; }
+# ssh-keyscan: the test host key, or another one once "$STATE/altkey" exists (a changed/impostor host)
+stub ssh-keyscan 'host="${!#}"; if [ -f "$STATE/altkey" ]; then echo "$host $ALTPUB"; else echo "$host $HOSTPUB"; fi'
 stub ssh-copy-id 'exit 0'
 stub brew 'exit 0'
-# ssh: -O exit / "true" succeed; the status probe prints a fixed snapshot; anything else is
-# echoed back; a remote command containing "exit 7" exits 7.
+# ssh: -O exit / "true" succeed (for cn-pw* only after the password login installed the key);
+# the password login checks the askpass answer; the status probe prints a fixed snapshot;
+# anything else is echoed back; a remote command containing "exit 7" exits 7.
 stub ssh 'case "$*" in
   *"-O exit"*) exit 0 ;;
+  *"PubkeyAuthentication=no"*)
+    [ -n "${SSH_ASKPASS:-}" ] && [ "$("$SSH_ASKPASS")" = s3cret ] || exit 255
+    echo "$*" >"$STATE/pwcmd"; touch "$STATE/pw-authorized" ;;
+  *cn-pw*" true") [ -f "$STATE/pw-authorized" ] ;;
   *" true") exit 0 ;;
   *"bash -s -- --both"*) cat >/dev/null
     echo "Test CPU 4C/8T eff 8, 31G RAM, no GPU | load 0.10, mem 20G free, disk /Users:100G, tmux -"
@@ -83,7 +91,7 @@ check "agent rules block in ~/.claude/CLAUDE.md" grep -q '^<!-- BEGIN compute-no
 check "docker context wsl created" grep -qx wsl "$STATE/contexts"
 check "docker context wsl is default" grep -qx wsl "$STATE/current"
 check "mutagen daemon registered (stub)" grep -q '^mutagen daemon register' "$LOG"
-check "authorize line printed" sh -c "echo \"\$1\" | grep -q \"cn-authorize 'ssh-ed25519 \"" _ "$OUT"
+check "cnode key prints the manual cn-authorize line" sh -c "env -i HOME='$H1' PATH=/usr/bin:/bin '$H1/.local/bin/cnode' key | grep -q \"^cn-authorize 'ssh-ed25519 \""
 
 echo "-- second run changes nothing"
 before="$(snapshot "$H1")"
@@ -99,13 +107,32 @@ echo "-- host key verification"
 OUT="$(as_user "$H1" cnode add evil --host node1.example.test --user alice --fingerprint SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 2>&1)"; rc=$?
 check "wrong fingerprint is refused" test "$rc" != 0
 check "refused node not registered" sh -c "! grep -q '^evil ' '$H1/.config/compute-node/nodes'"
-OUT="$(as_user "$H1" cnode add tofu --host other.example.test --user bob </dev/null 2>&1)"; rc=$?
-check "unknown key without --fingerprint/--accept-new and no TTY is refused" test "$rc" != 0
-OUT="$(as_user "$H1" cnode add gpu2 --host other.example.test --user bob --port 2200 --accept-new </dev/null 2>&1)"; rc=$?
-check "--accept-new adds a second node" test "$rc" = 0
+OUT="$(as_user "$H1" cnode add gpu2 --host other.example.test --user bob --port 2200 </dev/null 2>&1)"; rc=$?
+check "no --fingerprint: trusted on first use, second node added" test "$rc" = 0
+check "TOFU prints the fingerprint" sh -c "echo \"\$1\" | grep -q 'first use: $HOSTFP'" _ "$OUT"
+touch "$STATE/altkey"
+OUT="$(as_user "$H1" cnode add gpu2 --host other.example.test --user bob --port 2200 </dev/null 2>&1)"; rc=$?
+check "a changed host key for a known node is refused" sh -c "[ $rc != 0 ] && echo \"\$1\" | grep -q CHANGED" _ "$OUT"
+check "the pinned key was not replaced" grep -q "^cn-gpu2 $HOSTPUB" "$H1/.config/compute-node/known_hosts"
+rm -f "$STATE/altkey"
 check "second node has its own alias" grep -qx "Host cn-gpu2" "$H1/.config/compute-node/ssh_config"
 check "default stays wsl" grep -qx wsl "$H1/.config/compute-node/default"
-check "bad name rejected" sh -c "! env -i HOME='$H1' PATH='$STUBS:/usr/bin:/bin' '$H1/.local/bin/cnode' add Bad_Name --host x --user y --accept-new"
+check "bad name rejected" sh -c "! env -i HOME='$H1' PATH='$STUBS:/usr/bin:/bin' '$H1/.local/bin/cnode' add Bad_Name --host x --user y"
+
+echo "-- first login with a password installs the key"
+OUT="$(as_user "$H1" cnode add pw1 --host pw.example.test --user dave </dev/null 2>&1)"; rc=$?
+check "no password and no terminal: exit 3 with the cn-authorize fallback" sh -c "[ $rc = 3 ] && echo \"\$1\" | grep -q \"cn-authorize 'ssh-ed25519 \"" _ "$OUT"
+OUT="$(as_user "$H1" env CN_PASSWORD=s3cret cnode add pw1 --host pw.example.test --user dave </dev/null 2>&1)"; rc=$?
+check "CN_PASSWORD: password login once, then key login works" test "$rc" = 0
+check "the password login appends this machine's public key" grep -qF "$(cut -d' ' -f2 "$H1/.ssh/id_ed25519.pub")" "$STATE/pwcmd"
+check "it does not use or reuse the key/master for that login" sh -c "grep -q 'ControlPath=none' '$STATE/pwcmd' && grep -q 'PubkeyAuthentication=no' '$STATE/pwcmd'"
+check "wrong password fails" sh -c "rm -f '$STATE/pw-authorized'; ! env -i HOME='$H1' PATH='$STUBS:/usr/bin:/bin' CN_PASSWORD=nope '$H1/.local/bin/cnode' add pw2 --host pw2.example.test --user dave </dev/null >/dev/null 2>&1"
+as_user "$H1" cnode remove pw2 >/dev/null 2>&1; as_user "$H1" cnode remove pw1 >/dev/null 2>&1
+
+echo "-- piped install (curl | bash) fetching the other files from CN_RAW_URL"
+H5="$(new_home home5)"
+OUT="$(cat "$REPO/install.sh" | as_user "$H5" env CN_RAW_URL="file://$REPO" bash -s -- control --no-install --no-agent-rules 2>&1)"; rc=$?
+check "piped install works (files fetched from the URL)" sh -c "[ $rc = 0 ] && test -x '$H5/.local/bin/cnode' && test -f '$H5/.local/share/compute-node/cn-status'"
 
 echo "-- wsync / rx"
 P="$H1/proj"; mkdir -p "$P/sub"

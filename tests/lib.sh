@@ -7,6 +7,7 @@ check() { # check "description" command...
   local d="$1"; shift
   if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi
 }
+not() { ! "$@"; }
 finish() { [ "$FAILS" -eq 0 ] && { echo "  all checks passed"; exit 0; }; echo "  $FAILS check(s) failed"; exit 1; }
 
 # Docker engine memory gate: skip (exit 77) unless more than MIN_AVAILABLE_MB is available.

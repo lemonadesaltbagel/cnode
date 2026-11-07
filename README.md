@@ -1,15 +1,16 @@
 # compute-node
 
-Use a GPU machine (a Windows PC through WSL2, or any Debian/Ubuntu box) from your laptop as if
-its CPU and GPU were plugged in locally. Your code and your AI coding agent stay on the laptop;
-heavy commands run on the compute node in the **same absolute path** and their output syncs back.
+Use a GPU machine (a Windows PC through its WSL2 distro, or any Debian/Ubuntu box) from your
+laptop as if its CPU and GPU were plugged in locally. Your code and your AI coding agent stay on
+the laptop; heavy commands run on the compute node in the **same absolute path** and their
+output syncs back.
 
 [中文说明](README.zh-CN.md)
 
 ```
  control nodes (laptop: agent + code)                 compute nodes (CPU / GPU / Docker)
  ┌──────────────────────────────────┐                ┌──────────────────────────────────┐
- │ edit, git, grep: local and fast  │ Mutagen 2-way  │ n1: Windows 11 -> WSL2 (Debian)  │
+ │ edit, git, grep: local and fast  │ Mutagen 2-way  │ n1: WSL2 distro on a Windows PC  │
  │ ~/proj  ── wsync -n n1 ──────────┼───────────────>│ /Users/you/proj  (same path)     │
  │ rx -n n1 <cmd> ──────────────────┼── ssh :2222 ──>│ runs <cmd> there, CUDA works     │
  │ docker --context n1 ... ─────────┼── ssh ────────>│ Docker Engine + NVIDIA runtime   │
@@ -31,76 +32,52 @@ its own jobs (tmux etc.).
 
 ## Quick start
 
-Order does not matter much; the usual flow is: set up the compute node, copy its **join line**,
-set up the control node with it, then paste the control node's **authorize line** on the node.
+Two commands: one on the compute node, one on each laptop.
 
-The commands below download from this repository's raw URL, `https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main`.
-For a fork, run `tools/set-raw-url.sh https://raw.githubusercontent.com/<owner>/<repo>/main` first.
-
-### 1a. Compute node on Windows 11 (WSL2)
-
-In an **elevated** PowerShell (right-click > Run as administrator):
-
-```powershell
-irm https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.ps1 | iex
-```
-
-With options (all optional):
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.ps1))) -Distro Debian -User alice -AuthorizeKey 'ssh-ed25519 AAAA... laptop'
-```
-
-It enables WSL2 if needed (then asks for a reboot and to run the same command again), installs a
-Debian distro if there is no Debian/Ubuntu one, merges the `.wslconfig` settings below, runs the
-Linux setup inside the distro, adds the Hyper-V firewall rule, disables sleep on AC power and
-registers a boot task so the node comes up without anyone logging in. It finishes by printing the
-join line. Options: `-Distro`, `-User`, `-SshPort 2222`, `-MemoryGB`, `-SyncRoot /Users`,
-`-AuthorizeKey`, `-NoDocker`, `-AllowLanPassword`, `-InstallTailscale`, `-SkipWslConfig`,
-`-SkipPower`, `-SkipTask`, `-SkipFirewall`, `-ResetTask`.
-
-Requirements: Windows 11 22H2 or newer (mirrored networking), the **Windows** NVIDIA driver
-(never install a Linux driver inside WSL). For the boot task it asks once for your Windows
-account **password** (not the PIN; for a Microsoft account, its password).
-
-### 1b. Compute node on plain Linux (Debian/Ubuntu)
+### 1. Compute node: inside the WSL2 distro, or on a Debian/Ubuntu machine
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | sudo bash -s -- node
 ```
 
-Options: `--user NAME` (default: the user who ran sudo), `--create-user`, `--port 2222`,
-`--sync-root DIR` (repeatable, default `/Users`), `--authorize 'KEY'`, `--allow-lan-password`,
-`--no-docker`, `--gpu auto|yes|no`. For a GPU, install the NVIDIA driver first; the setup adds
-the NVIDIA Container Toolkit when it sees one.
+Run it in the WSL terminal (WSL2 must already be installed; nothing on the Windows side is
+changed) or on the Linux machine. It installs sshd on port 2222, Docker Engine (plus the NVIDIA
+Container Toolkit when a GPU is visible), Tailscale, `cn-status`/`cn-authorize`, and the `/Users`
+sync root. Tailscale's login prints a URL: open it once and log in. For an unattended install pass
+an auth key: `... node --authkey tskey-auth-...`. Without Tailscale (LAN only): `--no-tailscale`.
 
-Both variants end with something like:
+Other options: `--user NAME` (default: the user who ran sudo), `--create-user`, `--port 2222`,
+`--sync-root DIR` (repeatable), `--ts-hostname NAME`, `--key-only`, `--authorize 'KEY'`,
+`--no-docker`, `--gpu auto|yes|no`. For a GPU on plain Linux install the NVIDIA driver first; on
+WSL use the **Windows** NVIDIA driver (never a Linux driver inside WSL).
+
+It ends with a join line and the command for the laptop:
 
 ```
   join: host=<machine>.<tailnet>.ts.net user=alice port=2222 fingerprint=SHA256:...
+  curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --name <name> --host <machine>.<tailnet>.ts.net --user alice --port 2222
 ```
 
-### 2. Control node (macOS or Linux)
+### 2. Control node: the laptop (macOS or Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --host <host> --user <user> --fingerprint SHA256:...
+curl -fsSL https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main/install.sh | bash -s -- control --host <host> --user <user>
 ```
 
-This installs Mutagen (Homebrew on macOS, else the release binary), the docker CLI (macOS with
+Use the `host`/`user` from the join line (the laptop must be on the same tailnet, or the same LAN
+with `--no-tailscale`). It asks for the node user's **password once**, installs this machine's
+SSH key on the node, and from then on `rx`, `wsync` and agents never prompt. The node's host key
+is trusted on first use; add `--fingerprint SHA256:...` from the join line to pin it instead.
+
+It also installs Mutagen (Homebrew on macOS, else the release binary), the docker CLI (macOS with
 Homebrew), an SSH key if you have none, `cnode`/`rx`/`wsync` in `~/.local/bin`, an SSH alias per
-node with connection reuse, a docker context per node, the agent rules block in
+node with connection reuse, a docker context per node, and the agent rules block in
 `~/.claude/CLAUDE.md` (and `~/.codex/AGENTS.md` if `~/.codex` exists; `--agent-rules FILE` for
-more, `--no-agent-rules` to skip), and registers the node (default name `wsl`; `--name gpu1` to
-choose). `bash -s -- control --help` lists everything.
+more, `--no-agent-rules` to skip). The node is named `wsl` unless you pass `--name`. More nodes
+later: `cnode add <name> --host <host> --user <user>`. `bash -s -- control --help` lists everything.
 
-If the node does not know this machine's key yet, the installer prints the line to run **on the
-node**:
-
-```bash
-cn-authorize 'ssh-ed25519 AAAA... you@laptop-compute-node'
-```
-
-(On Windows: `wsl -d <Distro> -u <user> -- cn-authorize '...'`.) `cnode key` prints it again.
+No password at hand (or the node runs `--key-only`)? Run the line printed by `cnode key` on the
+node, as the node user: `cn-authorize 'ssh-ed25519 AAAA... you@laptop-compute-node'`.
 
 ### 3. Check
 
@@ -109,7 +86,7 @@ cd ~/some-project
 wsync                  # start syncing this folder to the default node
 rx nproc               # runs on the node, in the same path
 rx nvidia-smi          # GPU visible
-rx nodes               # status of every node
+rx nodes               # hardware and load of every node
 docker --context wsl run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 ```
 
@@ -122,9 +99,9 @@ docker --context wsl run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvi
 | `wsync -t [-n node \| -a] [dir]` | Stop syncing (files stay on both sides). `-a`: all nodes. |
 | `rx [-n node] <cmd>` | Flush local changes, run `<cmd>` on the node in the same directory (login shell), wait until the node's output has synced back. Exit code and output are passed through. |
 | `rx nodes [--json]` | Query every node in parallel (short timeout): hardware (CPU model, cores/threads, effective CPUs, RAM, GPU names/memory/driver/CUDA, OS, WSL or not) and live load (load average, free memory, GPU memory used and utilization, disk free on the sync root, tmux sessions), plus sync state. Unreachable nodes are reported, not fatal. Schema below. |
-| `cnode add <name> --host H --user U [--port P] [--fingerprint FP]` | Register another compute node. |
+| `cnode add <name> --host H --user U [--port P] [--fingerprint FP]` | Register another compute node; asks for its password once and installs this machine's key. |
 | `cnode list` / `cnode default [name]` / `cnode remove <name>` | Manage the registry. |
-| `cnode key` | Print the `cn-authorize` line for this machine. |
+| `cnode key` | Print the `cn-authorize` line for this machine (manual alternative to the password login). |
 | `ssh cn-<node>` | A shell on the node. `ssh -N -L 8888:localhost:8888 cn-<node>` forwards a port. |
 | `docker --context <node> ...` | Docker on the node (the install makes the first node the default context). |
 
@@ -249,82 +226,92 @@ lets the agent run anything on the node without asking, and files it writes ther
 
 ## What the installers change
 
-### Windows (`install.ps1`)
+### Compute node (`scripts/node-setup.sh`)
 
-| Change | Why |
+| Change | Where / why |
 |---|---|
-| `%USERPROFILE%\.wslconfig`, merged (other keys kept, backup `.wslconfig.bak-<time>` when it changes) | `[wsl2] memory=<75% of RAM>GB` caps the VM; `networkingMode=mirrored` makes WSL share Windows' network interfaces, so `<windows-host>:2222` reaches sshd in WSL; `vmIdleTimeout=-1` keeps the VM from shutting down when idle; `[experimental] autoMemoryReclaim=gradual` hands freed page cache back to Windows. |
-| Hyper-V firewall rule `WSL-SSH-2222` | With mirrored networking, inbound traffic to WSL is filtered by the Hyper-V firewall. |
-| `powercfg`: never sleep / hibernate on AC | A sleeping PC is not a compute node. |
-| Scheduled task `WSL Compute Node` | At boot, runs `wsl -d <Distro> --exec /bin/sleep infinity` as you, without logon; systemd in the distro starts sshd and Docker. |
-| WSL itself, a Debian distro, a Linux user | Only when missing. |
-
-### Inside WSL / on Linux (`scripts/node-setup.sh`)
-
-| Change | Where |
-|---|---|
-| sshd on port 2222 (not 22, so it never clashes with Windows' own OpenSSH), keys only, no root login, more parallel sessions for agents | `/etc/ssh/sshd_config.d/10-compute-node.conf`. Ubuntu's `ssh.socket` is switched to `ssh.service` so the port applies. `--allow-lan-password` restores password logins from private and Tailscale (`100.64.0.0/10`) ranges. |
-| Docker Engine from Docker's apt repository, user added to `docker` | Skipped if another `docker` exists (Docker Desktop integration, `docker.io`). |
+| sshd on port 2222 (not 22, so it never clashes with Windows' own OpenSSH), password or key login, no root login, more parallel sessions for agents | `/etc/ssh/sshd_config.d/10-compute-node.conf`. Ubuntu's `ssh.socket` is switched to `ssh.service` so the port applies. `--key-only` turns passwords off. |
+| Tailscale from Tailscale's apt repository, `tailscaled` running, `tailscale up` | Under systemd as a service; without systemd started directly; without a TUN device in userspace-networking mode. `--no-tailscale` skips it. |
+| Docker Engine from Docker's apt repository, user added to `docker` | Skipped if another `docker` exists (Docker Desktop integration, `docker.io`). Without systemd it is started with its init script. |
 | NVIDIA Container Toolkit (`--gpus all`) | Only when an NVIDIA GPU is visible. |
 | inotify limits for Mutagen and build tools | `/etc/sysctl.d/90-compute-node.conf` |
 | `nvidia-smi` for SSH sessions (WSL puts `/usr/lib/wsl/lib` on PATH only for local terminals) | `/usr/local/bin/nvidia-smi`, `/etc/profile.d/wsl-lib.sh` (WSL only) |
 | Sync root `/Users` owned by the node user | Mirrors macOS paths. For a Linux control node add `--sync-root /home/<you>`. |
 | `cn-status`, `cn-authorize` | `/usr/local/bin`, settings in `/etc/compute-node.conf` |
-| systemd on WSL | `/etc/wsl.conf [boot] systemd=true` (and `[user] default=`); exits with code 10 so the distro is restarted (install.ps1 does it). |
-
-Without systemd (containers, some minimal hosts) sshd is started directly and Docker is not.
+| systemd on WSL | `/etc/wsl.conf [boot] systemd=true` and `[user] default=`, used from the distro's next start; until then the services are started directly, so nothing has to be restarted now. |
 
 ### Control node (`scripts/control-setup.sh`, `bin/cnode`)
 
 | Change | Notes |
 |---|---|
 | `~/.ssh/config`: a marked block at the very top, `Include ~/.config/compute-node/ssh_config` | `Include` must precede any `Host` line. The block written by the original single-node setup (`# BEGIN wsl-compute`) is migrated and removed. |
-| `~/.config/compute-node/` | `nodes`, `default`, generated `ssh_config` (one `Host cn-<name>` per node, `ControlMaster`/`ControlPersist 30m`, keychain on macOS), `known_hosts` (pinned host keys). |
+| `~/.config/compute-node/` | `nodes`, `default`, generated `ssh_config` (one `Host cn-<name>` per node, `ControlMaster`/`ControlPersist 30m`, keychain on macOS), `known_hosts` (host keys, trusted on first use or pinned with `--fingerprint`). |
 | `~/.local/bin/cnode`, `rx`, `wsync` (symlinks), `~/.local/share/compute-node/cn-status` | PATH line added to your shell rc if needed. |
 | `~/.ssh/id_ed25519` | Created only if missing; a passphrase goes to the macOS keychain. |
 | Mutagen daemon, docker context per node | `docker context use <first node>` unless `--keep-docker-context`. |
 | Agent rules block in `~/.claude/CLAUDE.md` (+ `~/.codex/AGENTS.md`) | Between markers, replaced in place; `--no-agent-rules` skips. |
 
+## What still needs Windows (WSL nodes)
+
+This tool changes nothing on the Windows side. What it cannot do from inside the distro:
+
+- **WSL2 itself** must be installed, with a Debian or Ubuntu distro (`wsl --install -d Debian`).
+- **The distro must be running.** WSL stops a distro some seconds after its last Windows-side
+  process (terminal) exits, and stops the VM when idle; systemd services do not keep it alive, and
+  after a Windows reboot nothing starts it. Keep a WSL terminal open, or set it up yourself on
+  Windows: `vmIdleTimeout=-1` under `[wsl2]` in `%USERPROFILE%\.wslconfig` and a logon/boot task
+  that runs `wsl -d <Distro> --exec sleep infinity`.
+- **Sleep**: a sleeping PC is not a compute node (Windows power settings).
+- **GPU driver**: the Windows NVIDIA driver provides CUDA inside WSL.
+- **LAN access without Tailscale**: in WSL's default NAT mode other machines cannot reach the
+  distro; that needs Windows-side port forwarding or `networkingMode=mirrored` (plus a Hyper-V
+  firewall rule). Tailscale inside the distro avoids all of this.
+- If Windows itself runs Tailscale *and* WSL uses mirrored networking, the two can conflict; use
+  `--no-tailscale` and the Windows machine's Tailscale name in that case.
+
 ## Security model
 
-- sshd on the node accepts **keys only** (unless `--allow-lan-password`) and no root login. A
-  control node is admitted by running `cn-authorize '<its public key>'` on the node.
-- Host keys are **pinned**: `cnode add` scans the node's key and accepts it only if it matches
-  `--fingerprint` from the join line (or a key you already trusted in `~/.ssh/known_hosts`). The
-  aliases use `StrictHostKeyChecking yes` with a dedicated known_hosts file keyed by alias, so a
-  changed IP (LAN vs Tailscale) does not matter but a changed key does. `--accept-new` (or
-  answering `y` on a terminal) is trust-on-first-use: convenient on a network you control, but it
-  would accept an impostor on the very first connection.
+This tool favours easy deployment; harden it when you need to.
+
+- sshd accepts **passwords and keys** (no root login). The password is only needed once per
+  control node: `cnode add` logs in with it and installs that machine's key; all later traffic
+  uses the key. After all control nodes are added you can re-run the node install with
+  `--key-only` to turn passwords off.
+- Host keys are **trusted on first use** and then pinned per node in a dedicated known_hosts
+  (`StrictHostKeyChecking yes`), so a *changed* key is refused (`cnode remove` + `cnode add` if it
+  is expected). On a network you do not trust, pass `--fingerprint` from the join line so the
+  very first connection is verified too.
+- With Tailscale only machines in your tailnet can reach port 2222 at all; with `--no-tailscale`
+  the port is open to the LAN.
 - Anyone who can run `rx` can run anything as the node user, and files written on the node sync
   back to the laptop. Treat a node like a second account of yours.
+- `CN_PASSWORD` (for scripted `cnode add`) puts the password in the environment of that one
+  command; prefer typing it.
 
-## Networking: Tailscale (recommended) or LAN
+## Networking: Tailscale (default) or LAN
 
 Tailscale gives each machine a stable name (`<machine>.<tailnet>.ts.net`) that works from
-anywhere and usually connects directly on the same LAN. On the Windows node: install Tailscale
-(or `-InstallTailscale`), log in, enable **Run unattended** in the tray menu. On the laptop:
-enable **Launch at login**. In the admin console, **Disable key expiry** for both machines
-(otherwise they log out after about 180 days) and keep **MagicDNS** on. `tailscale ping <host>`
+anywhere and usually connects directly on the same LAN. The node install runs it inside the WSL
+distro or Linux machine, so no router or Windows changes are needed. Install Tailscale on the
+laptop too and log in to the same tailnet. In the admin console, **Disable key expiry** for the
+node (otherwise it logs out after about 180 days) and keep **MagicDNS** on. `tailscale ping <host>`
 should say `via <LAN IP>`; `via DERP` means relayed (slower; check UDP 41641). Without Tailscale
-use the node's LAN IP (mirrored networking makes it the Windows IP). If the Windows Tailscale
-address does not reach WSL, install Tailscale inside the distro instead.
+use the node's LAN IP (`--no-tailscale`).
 
 ## Limits
 
-- **WSL memory**: the VM is capped by `.wslconfig` `memory=` (75% of RAM by default) and competes
-  with Windows; heavy jobs on a node someone also uses interactively can starve both. Add
-  `processors=<N>` under `[wsl2]` to limit cores.
-- **Containers as compute nodes**: a Docker or RunPod container can serve `rx`/`wsync` (sshd
-  starts without systemd), but it cannot run Docker Engine: unprivileged containers cannot create
-  the namespaces and cgroups it needs, and cannot host user namespaces for rootless Docker either.
-  Use `--no-docker` there.
+- **WSL memory**: WSL gets at most a share of Windows' RAM (by default half) and competes with
+  Windows; `rx nodes` shows what is really available. Changing the cap is a Windows setting
+  (`memory=` in `.wslconfig`).
+- **Containers as compute nodes**: a Docker or RunPod container can serve `rx`/`wsync` (sshd and
+  tailscaled start without systemd, Tailscale in userspace mode), but it cannot run Docker Engine:
+  unprivileged containers cannot create the namespaces and cgroups it needs, and cannot host user
+  namespaces for rootless Docker either. Use `--no-docker` there.
 - Each `rx` adds roughly 0.1-0.5 s; fine for real work, wasteful for thousands of tiny calls.
 - The network is the bottleneck for big files: download datasets on the node, not through sync.
-  Prefer a wired connection for the node.
 - Paths must be identical: macOS control nodes map to `/Users/...` on the node. Linux control
   nodes need their home path (e.g. `/home/alice`) added as a sync root on the node.
-- Windows 10 is not supported (no mirrored networking). Only Debian/Ubuntu (and derivatives)
-  for compute nodes.
+- Compute nodes: Debian/Ubuntu and derivatives only.
 - No scheduling, no locking between agents: `rx nodes` shows what is running; choosing is up to
   you or your agent.
 
@@ -332,19 +319,17 @@ address does not reach WSL, install Tailscale inside the distro instead.
 
 | Symptom | Cause / fix |
 |---|---|
-| PowerShell prints garbage and `You cannot call a method on a null-valued expression` | Windows PowerShell 5.1 reads BOM-less UTF-8 as the ANSI code page. `install.ps1` is ASCII-only for that reason; keep it that way if you edit it. |
-| `Unexpected token` when starting the script | Run a downloaded copy with `powershell -ExecutionPolicy Bypass -File <full path>\install.ps1`. |
+| The node is unreachable after a while (WSL) | The distro or the WSL VM stopped; see "What still needs Windows". Open a WSL terminal to start it again. |
+| `tailscale up` waits forever | Open the printed URL and log in, or re-run with `--authkey`. Check with `tailscale status`. |
 | `nvidia-smi: command not found` over SSH | Re-run the node setup (it links `nvidia-smi` into `/usr/local/bin`). |
 | `rx` or sync hangs or asks for a passphrase | The key's passphrase is not in the agent/keychain: `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` (macOS). |
-| Cannot connect to port 2222 | On Windows: `wsl -l -v` shows Running; `.wslconfig` has `networkingMode=mirrored` and `wsl --shutdown` ran since; `Get-NetFirewallHyperVRule -Name WSL-SSH-2222` exists; try the LAN IP to rule out Tailscale. |
-| `Host key verification failed` | The node's host key changed (reinstall?) or you reached another machine. Check the fingerprint on the node (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) and re-run `cnode add ... --fingerprint`. |
-| `Permission denied (publickey)` | Run the `cnode key` line on the node as the node user. |
+| `cnode add` fails at the password login | Wrong password, the node user has none (`sudo passwd <user>` on the node), or the node runs `--key-only`: use the `cnode key` line on the node instead. |
+| Cannot connect to port 2222 | Is the node up (`tailscale status` on both sides)? Same tailnet? Without Tailscale on WSL see "LAN access" above. |
+| `host key ... CHANGED` / `Host key verification failed` | The node was reinstalled or you reached another machine. Check on the node (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`); if expected: `cnode remove <node>` and add it again. |
 | `rx: ... does not exist on <node>` | The folder is not synced to that node: `wsync -n <node>` in the project root. |
 | `tailscale ping` shows `via DERP` | Relayed, not direct: same LAN? UDP 41641 blocked by the router? |
-| `client version != tailscaled server version` | Only a warning; update the Tailscale CLI. |
 | Sync conflicts | The control node wins; inspect with `wsync -l` or `mutagen sync monitor`. |
-| `permission denied` from docker on the node | Group membership needs a new login: `wsl --shutdown` and start again (or log out/in). |
-| After `wsl --shutdown` or a crash the node is gone | `Start-ScheduledTask "WSL Compute Node"`. Changed your Windows password? Re-run with `-SkipWslConfig -ResetTask`. |
+| `permission denied` from docker on the node | Group membership needs a new login (on WSL: close all WSL terminals, or `wsl --terminate <Distro>`). |
 
 ## Uninstall
 
@@ -357,18 +342,12 @@ rm -rf ~/.local/bin/{cnode,rx,wsync} ~/.local/share/compute-node ~/.config/compu
 awk '/^# BEGIN compute-node$/{s=1;next} /^# END compute-node$/{s=0;next} !s' ~/.ssh/config > ~/.ssh/config.new && mv ~/.ssh/config.new ~/.ssh/config
 ```
 
-Windows (elevated):
-```powershell
-Unregister-ScheduledTask -TaskName 'WSL Compute Node' -Confirm:$false
-Remove-NetFirewallHyperVRule -Name WSL-SSH-2222
-# restore .wslconfig from %USERPROFILE%\.wslconfig.bak-<time> if you want the old one back
-```
-
-Linux / WSL:
+Compute node (WSL or Linux):
 ```bash
 sudo rm /etc/ssh/sshd_config.d/10-compute-node.conf /etc/sysctl.d/90-compute-node.conf /etc/compute-node.conf \
         /usr/local/bin/cn-status /usr/local/bin/cn-authorize /etc/profile.d/wsl-lib.sh /usr/local/bin/nvidia-smi
 sudo systemctl restart ssh   # or disable it: sudo systemctl disable --now ssh
+sudo tailscale logout; sudo apt-get purge tailscale
 sudo apt-get purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin nvidia-container-toolkit
 # /Users holds synced copies of your projects; delete it once you no longer need them
 ```
@@ -376,35 +355,37 @@ sudo apt-get purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
 ## Repository layout
 
 ```
-install.sh              entry point for both roles (curl | bash), fetches what it needs
-install.ps1             Windows compute node (WSL2), then runs install.sh node inside WSL
-scripts/node-setup.sh   compute-node setup (Debian/Ubuntu, WSL or plain Linux)
+install.sh                entry point for both roles (curl | bash), fetches what it needs
+scripts/node-setup.sh     compute-node setup (Debian/Ubuntu, inside WSL or plain Linux)
 scripts/control-setup.sh  control-node setup (macOS/Linux)
-bin/cnode               rx, wsync (symlinks to it) and the node registry/status
-node/cn-status          node status snapshot (also piped over SSH by rx nodes)
-node/cn-authorize       add/list/remove control-node keys on a node
-templates/              agent rules blocks (en, zh-CN)
-tests/                  tests/run.sh [lint|control|node|multinode|ps|all]
-tools/set-raw-url.sh    fill in https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main once the repository is published
+bin/cnode                 rx, wsync (symlinks to it), the node registry and status
+node/cn-status            node hardware/load snapshot (also piped over SSH by rx nodes)
+node/cn-authorize         add/list/remove control-node keys on a node (manual path)
+templates/                agent rules blocks (en, zh-CN)
+tests/                    tests/run.sh [lint|control|node|multinode|all]
 ```
+
+The installers download from `https://raw.githubusercontent.com/lemonadesaltbagel/cnode/main`; set `CN_RAW_URL` to use a fork or a tag.
 
 ## Tests
 
-`tests/run.sh` runs everything that does not need a real Windows install:
+`tests/run.sh` runs everything without touching real machines:
 
-- `lint`: shellcheck and `bash -n` for every script; `install.ps1` must be ASCII-only.
+- `lint`: shellcheck and `bash -n` for every script, CRLF and download-URL checks.
 - `control`: the control-node install in throwaway HOMEs with ssh/mutagen/docker/brew stubbed:
-  files written, agent rules (default on, `--no-agent-rules`, AGENTS.md), host-key pinning (wrong fingerprint refused, TOFU only on request), rx/wsync
-  command lines, `rx nodes --json`, migration from the original single-node setup, and that a
-  second run changes nothing.
-- `node`: the compute-node install in fresh `debian:13` and `ubuntu:24.04` containers (no
-  systemd): sshd config and key login, Docker packages, cn-authorize, `--allow-lan-password`,
-  the WSL `wsl.conf`/exit-10 path, idempotency.
+  files written, agent rules (default on, `--no-agent-rules`, AGENTS.md), trust on first use and
+  refusal of a changed host key, wrong `--fingerprint` refused, the one-time password login that
+  installs the key (`CN_PASSWORD`, wrong password, no-terminal fallback), rx/wsync command lines,
+  `rx nodes --json`, the piped `curl | bash` path, migration from the original single-node setup,
+  and that a second run changes nothing.
+- `node`: the compute-node install in fresh `debian:13` and `ubuntu:24.04` containers (no systemd,
+  no TUN): password and key login, `--key-only`, Docker packages, the real Tailscale package with
+  its daemon and login stubbed (auth key, userspace mode, join host, no-key fallback),
+  `--no-tailscale`, cn-authorize, the WSL `wsl.conf` path, idempotency.
 - `multinode`: two compute-node containers and a control container with two users, all real
-  (ssh, Mutagen): join with fingerprints, `cn-authorize`, `wsync -n` of one folder to both nodes,
-  `rx -n`, `rx nodes --json` with one node stopped and one hung.
-- `ps`: parses `install.ps1` with Windows PowerShell 5.1 or pwsh (never runs it) and unit-tests
-  its `.wslconfig` merge under pwsh in a container.
+  (ssh, Mutagen): `cnode add` with a password installing the key, TOFU and pinned fingerprints,
+  the manual `cn-authorize` path, `wsync -n` of one folder to both nodes, `rx -n`, `rx nodes --json`
+  with one node stopped and one hung.
 
 Docker tests use the current docker context and skip themselves when the engine has less than
 `MIN_AVAILABLE_MB` (6000) free. No test uses a GPU.
